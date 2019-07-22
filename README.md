@@ -1,5 +1,7 @@
 # saltlick
 
+[![Travis Status](https://travis-ci.com/saltlick-crypto/saltlick-rs.svg?branch=master)](https://travis-ci.com/saltlick-crypto/saltlick-rs)
+
 A library for encrypting and decrypting file streams using libsodium.
 
 ### License
