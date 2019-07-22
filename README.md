@@ -5,10 +5,16 @@
 [![API](https://docs.rs/saltlick/badge.svg)](https://docs.rs/saltlick)
 [![Average time to resolve an issue](http://isitmaintained.com/badge/resolution/saltlick-crypto/saltlick-rs.svg)](http://isitmaintained.com/project/saltlick-crypto/saltlick-rs)
 [![Percentage of issues still open](http://isitmaintained.com/badge/open/saltlick-crypto/saltlick-rs.svg)](http://isitmaintained.com/project/saltlick-crypto/saltlick-rs)
+[![Minimum rustc version](https://img.shields.io/badge/rustc-1.34+-lightgray.svg)](https://github.com/saltlick-crypto/saltlick-rs#minimum-supported-rust-version-msrv)
 
 A library for encrypting and decrypting file streams using libsodium.
 
-### License
+## Minimum Supported Rust Version (MSRV)
+
+This crate is guaranteed to compile on stable Rust 1.34 and up. It *might*
+compile with older versions but that may change in any new patch release.
+
+## License
 
 Licensed under either of
 
@@ -18,7 +24,7 @@ Licensed under either of
 
 at your option.
 
-### Contribution
+## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
