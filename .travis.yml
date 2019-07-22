@@ -3,31 +3,35 @@ language: rust
 
 matrix:
   include:
-    - env: RUSTFMT
+    - name: "rustfmt"
       os: linux
       rust: 1.36.0
       install:
         - rustup component add rustfmt
       script:
         - cargo fmt --all -- --check
-    - env: CLIPPY
+    - name: "clippy"
       os: linux
       rust: 1.36.0
       install:
         - rustup component add clippy
       script:
         - cargo clippy --all-features -- -D clippy::all
-    - env: RUSTFLAGS="-D warnings"
+    - name: "fail-on-warnings"
+      env: RUSTFLAGS="-D warnings"
       os: linux
       rust: 1.36.0
+      script:
+        - cargo test --verbose
+    - name: "nightly"
+      os: linux
+      rust: nightly
       script:
         - cargo test --verbose
 
 rust:
   - 1.34.0  # Oldest supported
   - stable
-  - beta
-  - nightly
 
 os:
   - linux
