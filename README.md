@@ -1,7 +1,7 @@
 # saltlick
 
 [![Build Status](https://travis-ci.com/saltlick-crypto/saltlick-rs.svg?branch=master)](https://travis-ci.com/saltlick-crypto/saltlick-rs)
-[![Crate](https://img.shields.io/crates/d/saltlick.svg)](https://crates.io/crates/saltlick)
+[![Crate](https://img.shields.io/crates/v/saltlick.svg)](https://crates.io/crates/saltlick)
 [![API](https://docs.rs/saltlick/badge.svg)](https://docs.rs/saltlick)
 [![Average time to resolve an issue](http://isitmaintained.com/badge/resolution/saltlick-crypto/saltlick-rs.svg)](http://isitmaintained.com/project/saltlick-crypto/saltlick-rs)
 [![Percentage of issues still open](http://isitmaintained.com/badge/open/saltlick-crypto/saltlick-rs.svg)](http://isitmaintained.com/project/saltlick-crypto/saltlick-rs)
