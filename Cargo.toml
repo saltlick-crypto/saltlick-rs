@@ -3,6 +3,19 @@ name = "saltlick"
 version = "0.1.0"
 authors = ["Nick Stevens <nick@bitcurry.com>"]
 edition = "2018"
+description = "A library for encrypting and decrypting file streams using libsodium"
+documentation = "https://docs.rs/saltlick"
+homepage = "https://github.com/saltlick-crypto/saltlick-rs"
+repository = "https://github.com/saltlick-crypto/saltlick-rs"
+keywords = ["cryptography", "file", "libsodium", "security", "streaming"]
+categories = ["cryptography", "filesystem"]
+license = "Apache-2.0 OR MIT"
+
+[badges]
+travis-ci = { repository = "saltlick-crypto/saltlick-rs", branch = "master" }
+is-it-maintained-issue-resolution = { repository = "saltlick-crypto/saltlick-rs" }
+is-it-maintained-open-issues = { repository = "saltlick-crypto/saltlick-rs" }
+maintenance = { status = "actively-developed" }
 
 [dependencies]
 byteorder = "1.3"
