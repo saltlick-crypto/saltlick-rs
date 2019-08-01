@@ -73,7 +73,7 @@
 //!
 //! ```sh
 //! openssl genpkey -algorithm x25519 > secret.pem
-//! openssl pkey -in secret.key -pubout > public.pem
+//! openssl pkey -in secret.pem -pubout > public.pem
 //! ```
 
 pub mod crypter;
