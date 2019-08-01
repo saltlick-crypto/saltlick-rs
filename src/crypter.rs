@@ -74,14 +74,20 @@ const MAGIC: &[u8] = b"SALTLICK";
 const MAGIC_LEN: usize = 8;
 const MESSAGE_LEN_LEN: usize = secretstream::ABYTES + mem::size_of::<u32>();
 
+#[derive(Debug)]
+enum State<S, R, E: Clone> {
+    Next(S),
+    Return(R, S),
+    Error(E),
+    Empty,
+}
+
 enum EncrypterState {
     Start,
-    NextBlock(Stream<Push>),
-    WriteBlock(Stream<Push>),
-    Finalize(Stream<Push>),
+    NextBlock(MultiBuf, Stream<Push>),
+    WriteBlock(MultiBuf, Stream<Push>),
+    Finalize(MultiBuf, Stream<Push>),
     Finalized,
-    Error(SaltlickError),
-    None,
 }
 
 impl fmt::Debug for EncrypterState {
@@ -89,12 +95,10 @@ impl fmt::Debug for EncrypterState {
         use self::EncrypterState::*;
         match self {
             Start => write!(f, "EncrypterState::Start"),
-            NextBlock(_) => write!(f, "EncrypterState::NextBlock"),
-            WriteBlock(_) => write!(f, "EncrypterState::WritBlock"),
-            Finalize(_) => write!(f, "EncrypterState::Finalize"),
+            NextBlock(_, _) => write!(f, "EncrypterState::NextBlock"),
+            WriteBlock(_, _) => write!(f, "EncrypterState::WriteBlock"),
+            Finalize(_, _) => write!(f, "EncrypterState::Finalize"),
             Finalized => write!(f, "EncrypterState::Finalized"),
-            Error(e) => write!(f, "EncrypterState::Error({:?})", e),
-            None => write!(f, "EncrypterState::None"),
         }
     }
 }
@@ -105,7 +109,7 @@ pub struct Encrypter {
     block_size: usize,
     plaintext: BytesMut,
     public_key: PublicKey,
-    state: EncrypterState,
+    state: State<EncrypterState, MultiBuf, SaltlickError>,
 }
 
 impl Encrypter {
@@ -115,7 +119,7 @@ impl Encrypter {
             block_size: 0,
             plaintext: BytesMut::new(),
             public_key,
-            state: EncrypterState::Start,
+            state: State::Next(EncrypterState::Start),
         };
         encrypter.set_block_size(DEFAULT_BLOCK_SIZE);
         encrypter
@@ -135,60 +139,64 @@ impl Encrypter {
         finalize: bool,
     ) -> Result<MultiBuf, SaltlickError> {
         use self::EncrypterState::*;
-        let mut output = MultiBuf::new();
         self.plaintext.extend_from_slice(plaintext.as_ref());
         loop {
-            match mem::replace(&mut self.state, None) {
-                Start => {
-                    let (stream, header) = self.start()?;
-                    self.state = NextBlock(stream);
-                    output.push(header);
+            let next_inner = match mem::replace(&mut self.state, State::Empty) {
+                State::Next(next) => next,
+                State::Return(value, next) => {
+                    self.state = State::Next(next);
+                    return Ok(value);
                 }
-                NextBlock(stream) => {
-                    if self.plaintext.len() >= self.block_size {
-                        self.state = WriteBlock(stream);
-                    } else if finalize {
-                        self.state = Finalize(stream);
-                    } else {
-                        self.state = NextBlock(stream);
-                        return Ok(output);
-                    }
-                }
-                WriteBlock(mut stream) => match self.write_block(&mut stream, false) {
-                    Ok(buf) => {
-                        output.extend(buf);
-                        self.state = NextBlock(stream);
-                    }
-                    Err(e) => {
-                        self.state = Error(e);
-                    }
-                },
-                Finalize(mut stream) => match self.write_block(&mut stream, true) {
-                    Ok(buf) => {
-                        output.extend(buf);
-                        self.state = Finalized;
-                        return Ok(output);
-                    }
-                    Err(e) => {
-                        self.state = Error(e);
-                    }
-                },
-                Finalized => {
-                    self.state = Finalized;
-                    return Err(SaltlickError::Finalized);
-                }
-                Error(e) => {
+                State::Error(e) => {
+                    self.state = State::Error(e.clone());
                     return Err(e);
                 }
-                None => panic!("Encrypter state machine reached None state"),
-            }
+                State::Empty => panic!("Reached State::Empty - this is a bug!"),
+            };
+
+            let next_state = match next_inner {
+                Start => match self.start() {
+                    Ok((stream, header)) => {
+                        let mut output = MultiBuf::new();
+                        output.push(header);
+                        State::Next(NextBlock(output, stream))
+                    }
+                    Err(e) => State::Error(e),
+                },
+                NextBlock(output, stream) => {
+                    if self.plaintext.len() >= self.block_size {
+                        State::Next(WriteBlock(output, stream))
+                    } else if finalize {
+                        State::Next(Finalize(output, stream))
+                    } else {
+                        State::Return(output, NextBlock(MultiBuf::new(), stream))
+                    }
+                }
+                WriteBlock(mut output, mut stream) => match self.write_block(&mut stream, false) {
+                    Ok(buf) => {
+                        output.extend(buf);
+                        State::Next(NextBlock(output, stream))
+                    }
+                    Err(e) => State::Error(e),
+                },
+                Finalize(mut output, mut stream) => match self.write_block(&mut stream, true) {
+                    Ok(buf) => {
+                        output.extend(buf);
+                        State::Return(output, Finalized)
+                    }
+                    Err(e) => State::Error(e),
+                },
+                Finalized => State::Error(SaltlickError::Finalized),
+            };
+
+            self.state = next_state;
         }
     }
 
     /// Returns true if the crypter has been finalized.
     pub fn is_finalized(&self) -> bool {
         match self.state {
-            EncrypterState::Finalized => true,
+            State::Next(EncrypterState::Finalized) => true,
             _ => false,
         }
     }
@@ -265,34 +273,30 @@ impl fmt::Debug for KeyResolution {
 }
 
 enum DecrypterState {
-    ReadPreheader(KeyResolution),
-    ReadPublicKey(KeyResolution),
-    SecretKeyLookup(PublicKey, Box<dyn KeyLookupFn>),
-    ReadHeader(PublicKey, PublicKey, SecretKey),
-    OpenStream(Key, Header),
-    ReadLength(Stream<Pull>),
-    ReadBlock(Stream<Pull>, usize),
-    FinalBlock,
+    ReadPreheader(MultiBuf, KeyResolution),
+    ReadPublicKey(MultiBuf, KeyResolution),
+    SecretKeyLookup(MultiBuf, PublicKey, Box<dyn KeyLookupFn>),
+    ReadHeader(MultiBuf, PublicKey, PublicKey, SecretKey),
+    OpenStream(MultiBuf, Key, Header),
+    ReadLength(MultiBuf, Stream<Pull>),
+    ReadBlock(MultiBuf, Stream<Pull>, usize),
+    FinalBlock(MultiBuf),
     Finalized,
-    Error(SaltlickError),
-    None,
 }
 
 impl fmt::Debug for DecrypterState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::DecrypterState::*;
         match self {
-            ReadPreheader(_) => write!(f, "DecrypterState::ReadPreheader"),
-            ReadPublicKey(_) => write!(f, "DecrypterState::ReadPublicKey"),
-            SecretKeyLookup(_, _) => write!(f, "DecrypterState::SecretKeyLookup"),
-            ReadHeader(_, _, _) => write!(f, "DecrypterState::ReadHeader"),
-            OpenStream(_, _) => write!(f, "DecrypterState::OpenStream"),
-            ReadLength(_) => write!(f, "DecrypterState::ReadLength"),
-            ReadBlock(_, _) => write!(f, "DecrypterState::ReadBlock"),
-            FinalBlock => write!(f, "DecrypterState::FinalBlock"),
+            ReadPreheader(_, _) => write!(f, "DecrypterState::ReadPreheader"),
+            ReadPublicKey(_, _) => write!(f, "DecrypterState::ReadPublicKey"),
+            SecretKeyLookup(_, _, _) => write!(f, "DecrypterState::SecretKeyLookup"),
+            ReadHeader(_, _, _, _) => write!(f, "DecrypterState::ReadHeader"),
+            OpenStream(_, _, _) => write!(f, "DecrypterState::OpenStream"),
+            ReadLength(_, _) => write!(f, "DecrypterState::ReadLength"),
+            ReadBlock(_, _, _) => write!(f, "DecrypterState::ReadBlock"),
+            FinalBlock(_) => write!(f, "DecrypterState::FinalBlock"),
             Finalized => write!(f, "DecrypterState::Finalized"),
-            Error(e) => write!(f, "DecrypterState::Error({:?})", e),
-            None => write!(f, "DecrypterState::None"),
         }
     }
 }
@@ -301,15 +305,16 @@ impl fmt::Debug for DecrypterState {
 #[derive(Debug)]
 pub struct Decrypter {
     ciphertext: BytesMut,
-    state: DecrypterState,
+    state: State<DecrypterState, MultiBuf, SaltlickError>,
 }
 
 impl Decrypter {
     /// Create a new decrypter using the provided public and secret key.
     pub fn new(public_key: PublicKey, secret_key: SecretKey) -> Decrypter {
+        let key = KeyResolution::Available(public_key, secret_key);
         Decrypter {
             ciphertext: BytesMut::new(),
-            state: DecrypterState::ReadPreheader(KeyResolution::Available(public_key, secret_key)),
+            state: State::Next(DecrypterState::ReadPreheader(MultiBuf::new(), key)),
         }
     }
 
@@ -326,9 +331,10 @@ impl Decrypter {
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
     {
+        let key = KeyResolution::Deferred(Box::new(lookup_fn));
         Decrypter {
             ciphertext: BytesMut::new(),
-            state: DecrypterState::ReadPreheader(KeyResolution::Deferred(Box::new(lookup_fn))),
+            state: State::Next(DecrypterState::ReadPreheader(MultiBuf::new(), key)),
         }
     }
 
@@ -337,137 +343,140 @@ impl Decrypter {
     pub fn pull(&mut self, ciphertext: impl AsRef<[u8]>) -> Result<MultiBuf, SaltlickError> {
         use self::DecrypterState::*;
         use self::KeyResolution::*;
-        let mut output = MultiBuf::new();
         self.ciphertext.extend_from_slice(ciphertext.as_ref());
         loop {
-            match mem::replace(&mut self.state, None) {
-                ReadPreheader(key_resolution) => match read::preheader(&self.ciphertext) {
+            let next_inner = match mem::replace(&mut self.state, State::Empty) {
+                State::Next(next) => next,
+                State::Return(value, next) => {
+                    self.state = State::Next(next);
+                    return Ok(value);
+                }
+                State::Error(e) => {
+                    self.state = State::Error(e.clone());
+                    return Err(e);
+                }
+                State::Empty => panic!("Reached State::Empty - this is a bug!"),
+            };
+
+            let next_state = match next_inner {
+                ReadPreheader(output, key_resolution) => match read::preheader(&self.ciphertext) {
                     Ok(ReadStatus::Complete(version, n)) => {
                         self.ciphertext.advance(n);
                         if version != Version::V1 {
-                            self.state = Error(SaltlickError::UnsupportedVersion);
+                            State::Error(SaltlickError::UnsupportedVersion)
                         } else {
-                            self.state = ReadPublicKey(key_resolution);
+                            State::Next(ReadPublicKey(output, key_resolution))
                         }
                     }
                     Ok(ReadStatus::Incomplete(_needed)) => {
-                        self.state = ReadPreheader(key_resolution);
-                        return Ok(output);
+                        State::Return(output, ReadPreheader(MultiBuf::new(), key_resolution))
                     }
-                    Err(e) => {
-                        self.state = Error(e);
-                    }
+                    Err(e) => State::Error(e),
                 },
-                ReadPublicKey(key_resolution) => {
+                ReadPublicKey(output, key_resolution) => {
                     match read::header_v1_public_key(&self.ciphertext) {
                         Ok(ReadStatus::Complete(file_public_key, n)) => {
                             self.ciphertext.advance(n);
                             match key_resolution {
-                                Available(public_key, secret_key) => {
-                                    self.state =
-                                        ReadHeader(file_public_key, public_key, secret_key);
-                                }
+                                Available(public_key, secret_key) => State::Next(ReadHeader(
+                                    output,
+                                    file_public_key,
+                                    public_key,
+                                    secret_key,
+                                )),
                                 Deferred(lookup_fn) => {
-                                    self.state = SecretKeyLookup(file_public_key, lookup_fn);
+                                    State::Next(SecretKeyLookup(output, file_public_key, lookup_fn))
                                 }
                             }
                         }
                         Ok(ReadStatus::Incomplete(_needed)) => {
-                            self.state = ReadPublicKey(key_resolution);
-                            return Ok(output);
+                            State::Return(output, ReadPublicKey(MultiBuf::new(), key_resolution))
                         }
-                        Err(e) => {
-                            self.state = Error(e);
-                        }
+                        Err(e) => State::Error(e),
                     }
                 }
-                SecretKeyLookup(file_public_key, lookup_fn) => {
+                SecretKeyLookup(output, file_public_key, lookup_fn) => {
                     if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
-                        self.state =
-                            ReadHeader(file_public_key.clone(), file_public_key, secret_key);
+                        State::Next(ReadHeader(
+                            output,
+                            file_public_key.clone(),
+                            file_public_key,
+                            secret_key,
+                        ))
                     } else {
-                        self.state = Error(SaltlickError::SecretKeyNotFound);
+                        State::Error(SaltlickError::SecretKeyNotFound)
                     }
                 }
-                ReadHeader(file_public_key, public_key, secret_key) => {
+                ReadHeader(output, file_public_key, public_key, secret_key) => {
                     if file_public_key != public_key {
-                        return Err(SaltlickError::PublicKeyMismatch);
-                    }
-                    match read::header_v1_sealed_text(&self.ciphertext, &public_key, &secret_key) {
-                        Ok(ReadStatus::Complete((key, header), n)) => {
-                            self.ciphertext.advance(n);
-                            self.state = OpenStream(key, header);
-                        }
-                        Ok(ReadStatus::Incomplete(_needed)) => {
-                            self.state = ReadHeader(file_public_key, public_key, secret_key);
-                            return Ok(output);
-                        }
-                        Err(e) => {
-                            self.state = Error(e);
+                        State::Error(SaltlickError::PublicKeyMismatch)
+                    } else {
+                        match read::header_v1_sealed_text(
+                            &self.ciphertext,
+                            &public_key,
+                            &secret_key,
+                        ) {
+                            Ok(ReadStatus::Complete((key, header), n)) => {
+                                self.ciphertext.advance(n);
+                                State::Next(OpenStream(output, key, header))
+                            }
+                            Ok(ReadStatus::Incomplete(_needed)) => State::Return(
+                                output,
+                                ReadHeader(
+                                    MultiBuf::new(),
+                                    file_public_key,
+                                    public_key,
+                                    secret_key,
+                                ),
+                            ),
+                            Err(e) => State::Error(e),
                         }
                     }
                 }
-                OpenStream(key, header) => match Stream::init_pull(&header, &key) {
-                    Ok(stream) => {
-                        self.state = ReadLength(stream);
-                    }
-                    Err(()) => {
-                        self.state = Error(SaltlickError::DecryptionFailure);
-                    }
+                OpenStream(output, key, header) => match Stream::init_pull(&header, &key) {
+                    Ok(stream) => State::Next(ReadLength(output, stream)),
+                    Err(()) => State::Error(SaltlickError::DecryptionFailure),
                 },
-                ReadLength(mut stream) => match read::length(&self.ciphertext, &mut stream) {
+                ReadLength(output, mut stream) => match read::length(&self.ciphertext, &mut stream)
+                {
                     Ok(ReadStatus::Complete(length, n)) => {
                         self.ciphertext.advance(n);
-                        self.state = ReadBlock(stream, length);
+                        State::Next(ReadBlock(output, stream, length))
                     }
                     Ok(ReadStatus::Incomplete(_needed)) => {
-                        self.state = ReadLength(stream);
-                        return Ok(output);
+                        State::Return(output, ReadLength(MultiBuf::new(), stream))
                     }
-                    Err(e) => {
-                        self.state = Error(e);
-                    }
+                    Err(e) => State::Error(e),
                 },
-                ReadBlock(mut stream, length) => {
+                ReadBlock(mut output, mut stream, length) => {
                     match read::block(&self.ciphertext, &mut stream, length) {
                         Ok(ReadStatus::Complete((plaintext, finalized), n)) => {
                             self.ciphertext.advance(n);
                             output.push(plaintext);
                             if finalized {
-                                self.state = FinalBlock;
+                                State::Next(FinalBlock(output))
                             } else {
-                                self.state = ReadLength(stream);
+                                State::Next(ReadLength(output, stream))
                             }
                         }
                         Ok(ReadStatus::Incomplete(_needed)) => {
-                            self.state = ReadBlock(stream, length);
-                            return Ok(output);
+                            State::Return(output, ReadBlock(MultiBuf::new(), stream, length))
                         }
-                        Err(e) => {
-                            self.state = Error(e);
-                        }
+                        Err(e) => State::Error(e),
                     }
                 }
-                FinalBlock => {
-                    self.state = Finalized;
-                    return Ok(output);
-                }
-                Finalized => {
-                    self.state = Finalized;
-                    return Err(SaltlickError::Finalized);
-                }
-                Error(e) => {
-                    return Err(e);
-                }
-                None => panic!("Decrypter state machine reached None state"),
-            }
+                FinalBlock(output) => State::Return(output, Finalized),
+                Finalized => State::Error(SaltlickError::Finalized),
+            };
+
+            self.state = next_state;
         }
     }
 
     /// Returns true if the crypter has been finalized.
     pub fn is_finalized(&self) -> bool {
         match self.state {
-            DecrypterState::Finalized => true,
+            State::Next(DecrypterState::Finalized) => true,
             _ => false,
         }
     }
