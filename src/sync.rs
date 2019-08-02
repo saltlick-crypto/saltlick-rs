@@ -126,6 +126,20 @@ impl<R: Read> DecryptingReader<R> {
         }
     }
 
+    /// Create a new decryption layer over `reader` using `secret_key` and `public_key`.
+    pub fn new_deferred<F>(reader: R, lookup_fn: F) -> DecryptingReader<R>
+    where
+        F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
+    {
+        DecryptingReader {
+            buffer: vec![0u8; DEFAULT_BLOCK_SIZE * 2],
+            decrypter: Decrypter::new_deferred(lookup_fn),
+            finalized: false,
+            inner: reader,
+            plaintext: MultiBuf::new(),
+        }
+    }
+
     /// Stop reading/decrypting immediately and return the underlying reader.
     pub fn into_inner(self) -> R {
         self.inner
