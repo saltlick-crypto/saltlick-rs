@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [master] - Unreleased
+### Added
+- Add deferred key-loading function to `Decrypter`, allowing the type to be
+  constructed with a closure that later provides a secret key based on the
+  public key present in a stream.
+
 ### Changed
 - Change MSRV from 1.34 to 1.33
 

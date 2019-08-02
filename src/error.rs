@@ -14,7 +14,7 @@ use pem::PemError;
 use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
 
 /// Saltlick errors
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum SaltlickError {
     BadMagic,
     DecryptionFailure,
@@ -23,6 +23,7 @@ pub enum SaltlickError {
     IncorrectKeyLength,
     InvalidKeyFormat,
     PublicKeyMismatch,
+    SecretKeyNotFound,
     StreamStartFailure,
     UnsupportedKeyAlgorithm,
     UnsupportedVersion,
@@ -44,6 +45,7 @@ impl fmt::Display for SaltlickError {
             IncorrectKeyLength => write!(f, "Key is the incorrect length."),
             InvalidKeyFormat => write!(f, "Key file is invalid, must be PEM encoded ASN.1"),
             PublicKeyMismatch => write!(f, "Provided public key does not match file public key."),
+            SecretKeyNotFound => write!(f, "Unable to find secret key for file."),
             StreamStartFailure => write!(f, "Stream failed to start."),
             UnsupportedKeyAlgorithm => write!(f, "Key algorithm is unknown or unsupported."),
             UnsupportedVersion => write!(f, "Version is unknown or unsupported."),

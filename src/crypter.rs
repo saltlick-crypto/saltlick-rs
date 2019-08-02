@@ -231,9 +231,44 @@ impl Encrypter {
     }
 }
 
+// This is a workaround to allow calling a Box<FnOnce> in Rust versions less
+// than 1.35. When the MSRV is 1.35 or greater, this can be removed and
+// replaced directly with `Box<dyn FnOnce(...)>`.
+//
+// Refer to https://github.com/rust-lang/rust/issues/28796 for more info.
+trait KeyLookupFn {
+    fn call_box(self: Box<Self>, public_key: &PublicKey) -> Option<SecretKey>;
+}
+
+impl<T> KeyLookupFn for T
+where
+    T: FnOnce(&PublicKey) -> Option<SecretKey>,
+{
+    fn call_box(self: Box<Self>, public_key: &PublicKey) -> Option<SecretKey> {
+        (*self)(public_key)
+    }
+}
+
+enum KeyResolution {
+    Available(PublicKey, SecretKey),
+    Deferred(Box<dyn KeyLookupFn>),
+}
+
+impl fmt::Debug for KeyResolution {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::KeyResolution::*;
+        match self {
+            Available(_, _) => write!(f, "KeyResolution::Available"),
+            Deferred(_) => write!(f, "KeyResolution::Deferred"),
+        }
+    }
+}
+
 enum DecrypterState {
-    ReadPreheader,
-    ReadHeader,
+    ReadPreheader(KeyResolution),
+    ReadPublicKey(KeyResolution),
+    SecretKeyLookup(PublicKey, Box<dyn KeyLookupFn>),
+    ReadHeader(PublicKey, PublicKey, SecretKey),
     OpenStream(Key, Header),
     ReadLength(Stream<Pull>),
     ReadBlock(Stream<Pull>, usize),
@@ -247,8 +282,10 @@ impl fmt::Debug for DecrypterState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::DecrypterState::*;
         match self {
-            ReadPreheader => write!(f, "DecrypterState::ReadPreheader"),
-            ReadHeader => write!(f, "DecrypterState::ReadHeader"),
+            ReadPreheader(_) => write!(f, "DecrypterState::ReadPreheader"),
+            ReadPublicKey(_) => write!(f, "DecrypterState::ReadPublicKey"),
+            SecretKeyLookup(_, _) => write!(f, "DecrypterState::SecretKeyLookup"),
+            ReadHeader(_, _, _) => write!(f, "DecrypterState::ReadHeader"),
             OpenStream(_, _) => write!(f, "DecrypterState::OpenStream"),
             ReadLength(_) => write!(f, "DecrypterState::ReadLength"),
             ReadBlock(_, _) => write!(f, "DecrypterState::ReadBlock"),
@@ -264,8 +301,6 @@ impl fmt::Debug for DecrypterState {
 #[derive(Debug)]
 pub struct Decrypter {
     ciphertext: BytesMut,
-    public_key: PublicKey,
-    secret_key: SecretKey,
     state: DecrypterState,
 }
 
@@ -274,9 +309,26 @@ impl Decrypter {
     pub fn new(public_key: PublicKey, secret_key: SecretKey) -> Decrypter {
         Decrypter {
             ciphertext: BytesMut::new(),
-            public_key,
-            secret_key,
-            state: DecrypterState::ReadPreheader,
+            state: DecrypterState::ReadPreheader(KeyResolution::Available(public_key, secret_key)),
+        }
+    }
+
+    /// Create a new decrypter that calls `lookup_fn` with the public key
+    /// obtained from the stream to obtain a secret key.
+    ///
+    /// This function allows for delayed lookup of a secret key - for example,
+    /// when there are multiple potential keys that could have been used to
+    /// encrypt the file. The lookup function should return the secret key
+    /// corresponding to the given public key, or `None` if no appropriate key
+    /// is available. In this case, the Decrypter will return a
+    /// `SaltlickError::SecretKeyNotFound` error from `pull`.
+    pub fn new_deferred<F>(lookup_fn: F) -> Decrypter
+    where
+        F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
+    {
+        Decrypter {
+            ciphertext: BytesMut::new(),
+            state: DecrypterState::ReadPreheader(KeyResolution::Deferred(Box::new(lookup_fn))),
         }
     }
 
@@ -284,33 +336,70 @@ impl Decrypter {
     /// in return.
     pub fn pull(&mut self, ciphertext: impl AsRef<[u8]>) -> Result<MultiBuf, SaltlickError> {
         use self::DecrypterState::*;
+        use self::KeyResolution::*;
         let mut output = MultiBuf::new();
         self.ciphertext.extend_from_slice(ciphertext.as_ref());
         loop {
             match mem::replace(&mut self.state, None) {
-                ReadPreheader => match read::preheader(&self.ciphertext) {
+                ReadPreheader(key_resolution) => match read::preheader(&self.ciphertext) {
                     Ok(ReadStatus::Complete(version, n)) => {
                         self.ciphertext.advance(n);
                         if version != Version::V1 {
                             self.state = Error(SaltlickError::UnsupportedVersion);
                         } else {
-                            self.state = ReadHeader;
+                            self.state = ReadPublicKey(key_resolution);
                         }
                     }
                     Ok(ReadStatus::Incomplete(_needed)) => {
+                        self.state = ReadPreheader(key_resolution);
                         return Ok(output);
                     }
                     Err(e) => {
                         self.state = Error(e);
                     }
                 },
-                ReadHeader => {
-                    match read::header_v1(&self.ciphertext, &self.public_key, &self.secret_key) {
+                ReadPublicKey(key_resolution) => {
+                    match read::header_v1_public_key(&self.ciphertext) {
+                        Ok(ReadStatus::Complete(file_public_key, n)) => {
+                            self.ciphertext.advance(n);
+                            match key_resolution {
+                                Available(public_key, secret_key) => {
+                                    self.state =
+                                        ReadHeader(file_public_key, public_key, secret_key);
+                                }
+                                Deferred(lookup_fn) => {
+                                    self.state = SecretKeyLookup(file_public_key, lookup_fn);
+                                }
+                            }
+                        }
+                        Ok(ReadStatus::Incomplete(_needed)) => {
+                            self.state = ReadPublicKey(key_resolution);
+                            return Ok(output);
+                        }
+                        Err(e) => {
+                            self.state = Error(e);
+                        }
+                    }
+                }
+                SecretKeyLookup(file_public_key, lookup_fn) => {
+                    if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
+                        self.state =
+                            ReadHeader(file_public_key.clone(), file_public_key, secret_key);
+                    } else {
+                        self.state = Error(SaltlickError::SecretKeyNotFound);
+                    }
+                }
+                ReadHeader(file_public_key, public_key, secret_key) => {
+                    if file_public_key != public_key {
+                        return Err(SaltlickError::PublicKeyMismatch);
+                    }
+                    match read::header_v1_sealed_text(&self.ciphertext, &public_key, &secret_key) {
                         Ok(ReadStatus::Complete((key, header), n)) => {
                             self.ciphertext.advance(n);
                             self.state = OpenStream(key, header);
                         }
                         Ok(ReadStatus::Incomplete(_needed)) => {
+                            self.state = ReadHeader(file_public_key, public_key, secret_key);
                             return Ok(output);
                         }
                         Err(e) => {
@@ -332,6 +421,7 @@ impl Decrypter {
                         self.state = ReadBlock(stream, length);
                     }
                     Ok(ReadStatus::Incomplete(_needed)) => {
+                        self.state = ReadLength(stream);
                         return Ok(output);
                     }
                     Err(e) => {
@@ -402,7 +492,6 @@ mod read {
 
     const PREHEADER_LEN: usize = MAGIC_LEN + mem::size_of::<u8>();
     const SEALEDTEXT_LEN: usize = KEYBYTES + HEADERBYTES + SEALBYTES;
-    const HEADERV1_LEN: usize = PUBLICKEYBYTES + SEALEDTEXT_LEN;
 
     pub enum ReadStatus<T> {
         Incomplete(usize),
@@ -422,20 +511,27 @@ mod read {
         Ok(ReadStatus::Complete(version, PREHEADER_LEN))
     }
 
-    pub fn header_v1(
+    pub fn header_v1_public_key(
+        input: impl AsRef<[u8]>,
+    ) -> Result<ReadStatus<PublicKey>, SaltlickError> {
+        let input_len = input.as_ref().len();
+        if input_len < PUBLICKEYBYTES {
+            return Ok(ReadStatus::Incomplete(PUBLICKEYBYTES - input_len));
+        }
+        let public_key = PublicKey::from_raw_curve25519(&input.as_ref()[..PUBLICKEYBYTES])?;
+        Ok(ReadStatus::Complete(public_key, PUBLICKEYBYTES))
+    }
+
+    pub fn header_v1_sealed_text(
         input: impl AsRef<[u8]>,
         public_key: &PublicKey,
         secret_key: &SecretKey,
     ) -> Result<ReadStatus<(Key, Header)>, SaltlickError> {
         let input_len = input.as_ref().len();
-        if input_len < HEADERV1_LEN {
-            return Ok(ReadStatus::Incomplete(HEADERV1_LEN - input_len));
+        if input_len < SEALEDTEXT_LEN {
+            return Ok(ReadStatus::Incomplete(SEALEDTEXT_LEN - input_len));
         }
-        let header_public_key = PublicKey::from_raw_curve25519(&input.as_ref()[..PUBLICKEYBYTES])?;
-        if header_public_key != *public_key {
-            return Err(SaltlickError::PublicKeyMismatch);
-        }
-        let sealed_text = &input.as_ref()[PUBLICKEYBYTES..(PUBLICKEYBYTES + SEALEDTEXT_LEN)];
+        let sealed_text = &input.as_ref()[..SEALEDTEXT_LEN];
         let plaintext = sealedbox::open(sealed_text, &public_key.inner, &secret_key.inner)
             .map_err(|()| SaltlickError::DecryptionFailure)?;
         let symmetric_key =
@@ -444,7 +540,7 @@ mod read {
             .ok_or(SaltlickError::DecryptionFailure)?;
         Ok(ReadStatus::Complete(
             (symmetric_key, stream_header),
-            HEADERV1_LEN,
+            SEALEDTEXT_LEN,
         ))
     }
 
@@ -532,6 +628,7 @@ mod tests {
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
 
+    use crate::error::SaltlickError;
     use crate::key;
 
     use super::{Decrypter, Encrypter};
@@ -567,5 +664,59 @@ mod tests {
             Vec::from_buf(plaintext)
         );
         assert!(decrypter.is_finalized());
+    }
+
+    #[test]
+    fn one_byte_at_a_time_test() {
+        let test_data = random_bytes(3, 25000);
+        let (public, secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public.clone());
+        let mut ciphertext = Vec::new();
+        encrypter.set_block_size(500);
+        for byte in test_data.iter() {
+            ciphertext.extend(encrypter.push(&[*byte], false).unwrap().iter())
+        }
+        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap().iter());
+
+        let mut decrypter = Decrypter::new(public, secret);
+        let mut plaintext = Vec::new();
+        for byte in ciphertext {
+            plaintext.extend(Vec::from_buf(decrypter.pull(&[byte]).unwrap()));
+        }
+        assert_eq!(test_data, plaintext);
+        assert!(decrypter.is_finalized());
+    }
+
+    #[test]
+    fn deferred_key_load_test() {
+        let test_data = random_bytes(4, 25000);
+        let (public, secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public.clone());
+        let mut ciphertext = Vec::new();
+        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
+
+        let mut decrypter = Decrypter::new_deferred(move |_public| Some(secret));
+        let plaintext = Vec::from_buf(decrypter.pull(&ciphertext[..]).unwrap());
+
+        assert_eq!(test_data, plaintext);
+        assert!(decrypter.is_finalized());
+    }
+
+    #[test]
+    fn deferred_key_load_failure_test() {
+        let test_data = random_bytes(5, 25000);
+        let (public, _secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public.clone());
+        let mut ciphertext = Vec::new();
+        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
+
+        let mut decrypter = Decrypter::new_deferred(move |_public| None);
+        assert_eq!(
+            SaltlickError::SecretKeyNotFound,
+            decrypter.pull(&ciphertext[..]).unwrap_err()
+        );
     }
 }
