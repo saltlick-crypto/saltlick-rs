@@ -6,19 +6,30 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::str;
+
 use lazy_static::lazy_static;
 use pem;
 use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, BigUint, FromASN1, ToASN1, OID};
 use sodiumoxide::crypto::box_::PublicKey as SodiumPublicKey;
 use sodiumoxide::crypto::box_::SecretKey as SodiumSecretKey;
 
-use crate::error::SaltlickError;
+use crate::error::{SaltlickError, SaltlickKeyIoError};
 
 pub use sodiumoxide::crypto::box_::{self, PUBLICKEYBYTES, SECRETKEYBYTES};
 
 lazy_static! {
     static ref CURVE25519_OID: OID = simple_asn1::oid!(1, 3, 101, 110);
 }
+
+// Public keys are around 116 bytes as written by saltlick, and private keys
+// around 122 bytes. This could vary slightly if additional whitespace is added
+// or removed, but 200 should be plenty to read a key without risking reading
+// megabytes of data if a non-key file is provided.
+const MAX_KEYFILE_READ_SIZE: u64 = 200;
 
 /// Wrapper over libsodium-provided public key type.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
@@ -50,6 +61,29 @@ impl PublicKey {
             tag: String::from("PUBLIC KEY"),
             contents: der,
         })
+    }
+
+    /// Load a public key in PEM format from `path`.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<PublicKey, SaltlickKeyIoError> {
+        let mut buf = String::new();
+        File::open(path)?
+            .take(MAX_KEYFILE_READ_SIZE)
+            .read_to_string(&mut buf)?;
+        PublicKey::from_pem(&buf).map_err(SaltlickKeyIoError::from)
+    }
+
+    /// Write a public key to `path` in PEM format.
+    ///
+    /// Note that this uses `create_new` and will return the io::Error
+    /// `AlreadyExists` if there is already a file at the destination.
+    pub fn to_file(&self, path: impl AsRef<Path>) -> Result<(), SaltlickKeyIoError> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(self.to_pem().as_bytes())
+            .map(|_| ())
+            .map_err(SaltlickKeyIoError::from)
     }
 }
 
@@ -159,6 +193,29 @@ impl SecretKey {
             tag: String::from("PRIVATE KEY"),
             contents: der,
         })
+    }
+
+    /// Load a secret key in PEM format from `path`.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<SecretKey, SaltlickKeyIoError> {
+        let mut buf = String::new();
+        File::open(path)?
+            .take(MAX_KEYFILE_READ_SIZE)
+            .read_to_string(&mut buf)?;
+        SecretKey::from_pem(&buf).map_err(SaltlickKeyIoError::from)
+    }
+
+    /// Write a secret key to `path` in PEM format.
+    ///
+    /// Note that this uses `create_new` and will return the io::Error
+    /// `AlreadyExists` if there is already a file at the destination.
+    pub fn to_file(&self, path: impl AsRef<Path>) -> Result<(), SaltlickKeyIoError> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(self.to_pem().as_bytes())
+            .map(|_| ())
+            .map_err(SaltlickKeyIoError::from)
     }
 }
 

@@ -76,3 +76,37 @@ impl Into<io::Error> for SaltlickError {
         io::Error::new(io::ErrorKind::Other, self)
     }
 }
+
+/// Errors when loading keys directly from a file.
+///
+/// Errors possible when keys are loaded directly from files. Note that this is
+/// not part of the normal `SaltlickError` because `std::io::Error` does not
+/// implement `Clone`, `Hash`, or `Eq`.
+#[derive(Debug)]
+pub enum SaltlickKeyIoError {
+    IoError(io::Error),
+    SaltlickError(SaltlickError),
+}
+
+impl Error for SaltlickKeyIoError {}
+
+impl fmt::Display for SaltlickKeyIoError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SaltlickKeyIoError::IoError(e) => write!(f, "key file I/O error: {}", e),
+            SaltlickKeyIoError::SaltlickError(e) => write!(f, "key file parse error: {}", e),
+        }
+    }
+}
+
+impl From<io::Error> for SaltlickKeyIoError {
+    fn from(e: io::Error) -> SaltlickKeyIoError {
+        SaltlickKeyIoError::IoError(e)
+    }
+}
+
+impl From<SaltlickError> for SaltlickKeyIoError {
+    fn from(e: SaltlickError) -> SaltlickKeyIoError {
+        SaltlickKeyIoError::SaltlickError(e)
+    }
+}

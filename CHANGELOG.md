@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constructed with a closure that later provides a secret key based on the
   public key present in a stream.
 - Extend deferred key-loading to `DecryptingReader`.
+- Add helper functions to `PublicKey` and `SecretKey` that read/write keys
+  directly to/from PEM-encoded files.
 
 ### Changed
 - Change MSRV from 1.34 to 1.33
