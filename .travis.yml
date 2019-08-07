@@ -30,7 +30,7 @@ matrix:
         - cargo test --verbose
 
 rust:
-  - 1.34.0  # Oldest supported
+  - 1.33.0  # Oldest supported
   - stable
 
 os:
