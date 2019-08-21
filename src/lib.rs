@@ -84,7 +84,7 @@ mod multibuf;
 mod sync;
 mod version;
 
-pub use self::error::SaltlickError;
+pub use self::error::{SaltlickError, SaltlickKeyIoError};
 pub use self::key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES};
 pub use self::sync::{DecryptingReader, EncryptingWriter};
 pub use self::version::Version;

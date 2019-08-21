@@ -14,7 +14,7 @@ use pem::PemError;
 use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
 
 /// Saltlick errors
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum SaltlickError {
     BadMagic,
     DecryptionFailure,
@@ -23,6 +23,7 @@ pub enum SaltlickError {
     IncorrectKeyLength,
     InvalidKeyFormat,
     PublicKeyMismatch,
+    SecretKeyNotFound,
     StreamStartFailure,
     UnsupportedKeyAlgorithm,
     UnsupportedVersion,
@@ -44,6 +45,7 @@ impl fmt::Display for SaltlickError {
             IncorrectKeyLength => write!(f, "Key is the incorrect length."),
             InvalidKeyFormat => write!(f, "Key file is invalid, must be PEM encoded ASN.1"),
             PublicKeyMismatch => write!(f, "Provided public key does not match file public key."),
+            SecretKeyNotFound => write!(f, "Unable to find secret key for file."),
             StreamStartFailure => write!(f, "Stream failed to start."),
             UnsupportedKeyAlgorithm => write!(f, "Key algorithm is unknown or unsupported."),
             UnsupportedVersion => write!(f, "Version is unknown or unsupported."),
@@ -72,5 +74,39 @@ impl From<ASN1DecodeErr> for SaltlickError {
 impl Into<io::Error> for SaltlickError {
     fn into(self) -> io::Error {
         io::Error::new(io::ErrorKind::Other, self)
+    }
+}
+
+/// Errors when loading keys directly from a file.
+///
+/// Errors possible when keys are loaded directly from files. Note that this is
+/// not part of the normal `SaltlickError` because `std::io::Error` does not
+/// implement `Clone`, `Hash`, or `Eq`.
+#[derive(Debug)]
+pub enum SaltlickKeyIoError {
+    IoError(io::Error),
+    SaltlickError(SaltlickError),
+}
+
+impl Error for SaltlickKeyIoError {}
+
+impl fmt::Display for SaltlickKeyIoError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SaltlickKeyIoError::IoError(e) => write!(f, "key file I/O error: {}", e),
+            SaltlickKeyIoError::SaltlickError(e) => write!(f, "key file parse error: {}", e),
+        }
+    }
+}
+
+impl From<io::Error> for SaltlickKeyIoError {
+    fn from(e: io::Error) -> SaltlickKeyIoError {
+        SaltlickKeyIoError::IoError(e)
+    }
+}
+
+impl From<SaltlickError> for SaltlickKeyIoError {
+    fn from(e: SaltlickError) -> SaltlickKeyIoError {
+        SaltlickKeyIoError::SaltlickError(e)
     }
 }
