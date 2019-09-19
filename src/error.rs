@@ -6,12 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::error::Error;
-use std::fmt;
-use std::io;
-
 use pem::PemError;
 use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
+use std::{error::Error, fmt, io};
 
 /// Saltlick errors
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
@@ -71,9 +68,9 @@ impl From<ASN1DecodeErr> for SaltlickError {
     }
 }
 
-impl Into<io::Error> for SaltlickError {
-    fn into(self) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, self)
+impl From<SaltlickError> for io::Error {
+    fn from(e: SaltlickError) -> io::Error {
+        io::Error::new(io::ErrorKind::Other, e)
     }
 }
 

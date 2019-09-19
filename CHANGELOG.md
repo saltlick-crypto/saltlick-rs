@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [master] - Unreleased
+### Added
+- Add `Encrypter` and `Decrypter` methods `update_to_vec`, which automatically
+  allocates and fills a `Vec<u8>` for output.
+- Add `with_capacity` to `EncryptingWriter` and
+  `with_capacity`/`deferred_with_capacity` to `DecryptingReader` to allow
+  control of inner buffer sizes.
+
+### Changed
+- `Encrypter` and `Decrypter` now reuses buffers for communicating with
+  libsodium through sodiumoxide, avoiding many extra allocations and removing
+  the need for the `MultiBuf` helper.
+- The methods `Encrypter::pull` and `Decrypter::push` are now called
+  `Encrypter::update` and `Decrypter::update` and have changed function
+  signatures.
+
+### Removed
+- `MultiBuf` has been completely removed in favor of slices for input and
+  output to `Encrypter`/`Decrypter` `update` functions.
 
 ## [0.2.0] - 2020-01-16
 ### Added
