@@ -1,36 +1,42 @@
 sudo: false
 language: rust
 
-matrix:
+stages:
+  - check
+  - test
+  - nightly
+
+jobs:
+  allow_failures:
+    - nightly
+  fast_finish: true
   include:
-    - name: "rustfmt"
+    - stage: check
+      name: rustfmt
       os: linux
-      rust: 1.36.0
+      rust: 1.39.0
       install:
         - rustup component add rustfmt
       script:
         - cargo fmt --all -- --check
-    - name: "clippy"
+    - name: "clippy-and-warnings"
+      env: RUSTFLAGS="-D warnings"
       os: linux
-      rust: 1.36.0
+      rust: 1.39.0
       install:
         - rustup component add clippy
       script:
         - cargo clippy --all-features -- -D clippy::all
-    - name: "fail-on-warnings"
-      env: RUSTFLAGS="-D warnings"
-      os: linux
-      rust: 1.36.0
-      script:
         - cargo test --verbose
-    - name: "nightly"
+    - stage: nightly
+      name: nightly
       os: linux
       rust: nightly
       script:
         - cargo test --verbose
 
 rust:
-  - 1.33.0  # Oldest supported
+  - 1.36.0  # Oldest supported
   - stable
 
 os:
