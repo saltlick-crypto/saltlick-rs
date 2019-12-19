@@ -243,11 +243,7 @@ mod tests {
         let index = ciphertext.len() - 5;
         ciphertext[index] = ciphertext[index].wrapping_add(1);
 
-        let mut decrypter = DecryptingReader::new(
-            public_key.clone(),
-            secret_key.clone(),
-            Cursor::new(ciphertext),
-        );
+        let mut decrypter = DecryptingReader::new(public_key, secret_key, Cursor::new(ciphertext));
         let mut output = Vec::new();
         assert!(decrypter.read_to_end(&mut output).is_err());
     }
@@ -263,11 +259,7 @@ mod tests {
         // Remove a few bytes from the end
         ciphertext.resize(ciphertext.len() - 5, 0);
 
-        let mut decrypter = DecryptingReader::new(
-            public_key.clone(),
-            secret_key.clone(),
-            Cursor::new(ciphertext),
-        );
+        let mut decrypter = DecryptingReader::new(public_key, secret_key, Cursor::new(ciphertext));
         let mut output = Vec::new();
         assert!(decrypter.read_to_end(&mut output).is_err());
     }

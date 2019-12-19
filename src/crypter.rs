@@ -702,7 +702,7 @@ mod tests {
         let test_data = random_bytes(4, 25000);
         let (public, secret) = key::gen_keypair();
 
-        let mut encrypter = Encrypter::new(public.clone());
+        let mut encrypter = Encrypter::new(public);
         let mut ciphertext = Vec::new();
         ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
 
@@ -718,7 +718,7 @@ mod tests {
         let test_data = random_bytes(5, 25000);
         let (public, _secret) = key::gen_keypair();
 
-        let mut encrypter = Encrypter::new(public.clone());
+        let mut encrypter = Encrypter::new(public);
         let mut ciphertext = Vec::new();
         ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
 
