@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directly to/from PEM-encoded files.
 
 ### Changed
-- Change MSRV from 1.34 to 1.33
+- Change MSRV from 1.34 to 1.36 to address MSRV change in sodiumoxide
 
 ## [0.1.0] - July 22, 2019
 ### Added
