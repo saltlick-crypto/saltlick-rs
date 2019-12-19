@@ -19,7 +19,7 @@ jobs:
       install:
         - rustup component add rustfmt
       script:
-        - cargo fmt --all -- --check
+        - cargo fmt -- --check
     - name: "clippy-and-warnings"
       env: RUSTFLAGS="-D warnings"
       rust: 1.41.1
@@ -35,7 +35,7 @@ jobs:
       script:
         # Proptests take a lot longer to run in debug mode, enough so that the
         # extra time to build in release mode is worth it.
-        - cargo test --release --features=proptest-tests
+        - cargo test --release --all-features
     - name: "Rust: stable + tarpaulin"
       rust: stable
       addons:
@@ -45,7 +45,7 @@ jobs:
       before_cache: |
         bash <(curl https://raw.githubusercontent.com/xd009642/tarpaulin/master/travis-install.sh)
       after_success: |
-        cargo tarpaulin --out Xml
+        cargo tarpaulin --features='io-async' --out Xml
         bash <(curl -s https://codecov.io/bash)
     - os: windows
       rust: stable
