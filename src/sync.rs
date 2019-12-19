@@ -241,7 +241,7 @@ mod tests {
 
         // Inject a single bad byte near the end of the stream
         let index = ciphertext.len() - 5;
-        ciphertext[index] = 0;
+        ciphertext[index] = ciphertext[index].wrapping_add(1);
 
         let mut decrypter = DecryptingReader::new(
             public_key.clone(),
