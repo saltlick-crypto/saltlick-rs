@@ -5,14 +5,14 @@ matrix:
   include:
     - name: "rustfmt"
       os: linux
-      rust: 1.36.0
+      rust: 1.39.0
       install:
         - rustup component add rustfmt
       script:
         - cargo fmt --all -- --check
     - name: "clippy"
       os: linux
-      rust: 1.36.0
+      rust: 1.39.0
       install:
         - rustup component add clippy
       script:
@@ -20,7 +20,7 @@ matrix:
     - name: "fail-on-warnings"
       env: RUSTFLAGS="-D warnings"
       os: linux
-      rust: 1.36.0
+      rust: 1.39.0
       script:
         - cargo test --verbose
     - name: "nightly"
