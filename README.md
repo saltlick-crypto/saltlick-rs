@@ -9,6 +9,8 @@
 
 A library for encrypting and decrypting file streams using libsodium.
 
+Please see the [docs](https://docs.rs/saltlick) for details, usage, and examples.
+
 ## Minimum Supported Rust Version (MSRV)
 
 This crate is guaranteed to compile on stable Rust 1.36 and up. It *might*
