@@ -36,7 +36,7 @@ jobs:
         - cargo test --verbose
 
 rust:
-  - 1.36.0  # Oldest supported
+  - 1.39.0  # Oldest supported
   - stable
 
 os:
