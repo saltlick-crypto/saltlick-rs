@@ -7,10 +7,9 @@
 // except according to those terms.
 
 use std::cmp;
-use std::io::Cursor;
 use std::iter::FromIterator;
 
-use bytes::{Buf, Bytes, IntoBuf};
+use bytes::{Buf, Bytes};
 
 /// Non-contiguous [`bytes::Buf`] implementation over a collection of byte
 /// buffers.
@@ -40,12 +39,12 @@ use bytes::{Buf, Bytes, IntoBuf};
 ///
 /// // Data is accessible through all `Buf` interfaces.
 /// let expected = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
-/// let actual = multibuf.collect::<Vec<u8>>();
+/// let actual = multibuf.into_vec();
 /// assert_eq!(expected, actual);
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct MultiBuf {
-    buffers: Vec<Cursor<Bytes>>,
+    buffers: Vec<Bytes>,
 }
 
 impl MultiBuf {
@@ -58,12 +57,17 @@ impl MultiBuf {
 
     /// Pushes a new buffer to the end of the MultiBuf.
     pub fn push(&mut self, buf: impl Into<Bytes>) {
-        self.buffers.push(buf.into().into_buf());
+        self.buffers.push(buf.into());
     }
 
     /// Appends the contents of `other` to this MultiBuf, consuming `other`.
     pub fn extend(&mut self, other: MultiBuf) {
         self.buffers.extend(other.buffers);
+    }
+
+    /// Copies remaining bytes into a new `Vec`.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        self.to_bytes().to_vec()
     }
 }
 
@@ -74,7 +78,7 @@ impl Buf for MultiBuf {
 
     fn bytes(&self) -> &[u8] {
         match self.buffers.get(0) {
-            Some(ref buf) if buf.remaining() > 0 => buf.bytes(),
+            Some(ref buf) if buf.has_remaining() => buf.bytes(),
             _ => &[],
         }
     }
@@ -95,6 +99,17 @@ impl Buf for MultiBuf {
             }
         }
     }
+
+    fn to_bytes(&mut self) -> Bytes {
+        self.buffers
+            .iter()
+            .map(Buf::bytes)
+            .fold(Vec::with_capacity(self.remaining()), |mut acc, bs| {
+                acc.extend(bs);
+                acc
+            })
+            .into()
+    }
 }
 
 impl<A> FromIterator<A> for MultiBuf
@@ -105,7 +120,7 @@ where
     where
         T: IntoIterator<Item = A>,
     {
-        let buffers = iter.into_iter().map(A::into).map(Bytes::into_buf).collect();
+        let buffers = iter.into_iter().map(A::into).map(Bytes::into).collect();
         MultiBuf { buffers }
     }
 }
@@ -115,11 +130,7 @@ impl IntoIterator for MultiBuf {
     type IntoIter = ::std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.buffers
-            .into_iter()
-            .map(|b| b.into_inner())
-            .collect::<Vec<_>>()
-            .into_iter()
+        self.buffers.into_iter().collect::<Vec<_>>().into_iter()
     }
 }
 
@@ -133,7 +144,7 @@ mod tests {
         let buf = MultiBuf::new();
         assert_eq!(0, buf.remaining());
         assert_eq!(&[] as &[u8], buf.bytes());
-        assert_eq!(Vec::<u8>::new(), buf.collect::<Vec<u8>>());
+        assert_eq!(Vec::<u8>::new(), buf.into_vec());
     }
 
     #[test]
@@ -144,7 +155,7 @@ mod tests {
         buf.push(&[] as &[u8]);
         assert_eq!(0, buf.remaining());
         assert_eq!(&[] as &[u8], buf.bytes());
-        assert_eq!(Vec::<u8>::new(), buf.collect::<Vec<u8>>());
+        assert_eq!(Vec::<u8>::new(), buf.into_vec());
     }
 
     #[test]
@@ -154,7 +165,7 @@ mod tests {
             .collect();
         assert_eq!(9, buf.remaining());
         assert_eq!(&[0u8, 1, 2] as &[u8], buf.bytes());
-        assert_eq!(vec![0, 1, 2, 3, 4, 5, 6, 7, 8], buf.collect::<Vec<u8>>());
+        assert_eq!(vec![0, 1, 2, 3, 4, 5, 6, 7, 8], buf.into_vec());
     }
 
     #[test]
@@ -174,7 +185,7 @@ mod tests {
         buf.advance(2);
         assert_eq!(4, buf.remaining());
         assert_eq!(&[5u8] as &[u8], buf.bytes());
-        assert_eq!(vec![5, 6, 7, 8], buf.collect::<Vec<u8>>());
+        assert_eq!(vec![5, 6, 7, 8], buf.into_vec());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```
-//! use saltlick::crypter::{Buf, Decrypter, Encrypter, FromBuf};
+//! use saltlick::crypter::{Buf, Decrypter, Encrypter, MultiBuf};
 //!
 //! let test_data = vec![vec![1, 2, 3], vec![4, 5, 6]];
 //!
@@ -19,24 +19,24 @@
 //!
 //! // Data is pushed into the crypter. Block sizes are handled automatically.
 //! let mut encrypter = Encrypter::new(public.clone());
-//! let mut ciphertext = Vec::new();
+//! let mut ciphertext = MultiBuf::new();
 //! for block in test_data.iter() {
-//!     ciphertext.extend(encrypter.push(block, false).unwrap().iter())
+//!     ciphertext.extend(encrypter.push(block, false).unwrap())
 //! }
 //!
 //! // Once all data is written, the crypter must be manually finalized. After
 //! // this trying to add more data will result in an error. If the stream is not
 //! // finalized, decryption will fail as incomplete.
-//! ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap().iter());
+//! ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
 //!
 //! // Decryption is the opposite of encrypting - feed chunks of ciphertext to
 //! // the `Decrypter::pull` function until `Decrypter::is_finalized` returns
 //! // true.
 //! let mut decrypter = Decrypter::new(public, secret);
-//! let plaintext = decrypter.pull(ciphertext).unwrap();
+//! let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
 //! assert_eq!(
 //!     test_data.into_iter().flatten().collect::<Vec<u8>>(),
-//!     Vec::from_buf(plaintext)
+//!     plaintext.into_vec()
 //! );
 //! assert!(decrypter.is_finalized());
 //! ```
@@ -56,8 +56,7 @@ use crate::version::Version;
 use self::read::ReadStatus;
 
 pub use crate::multibuf::MultiBuf;
-pub use bytes::buf::FromBuf;
-pub use bytes::{Buf, Bytes, IntoBuf};
+pub use bytes::{Buf, Bytes};
 
 /// Minimum block size allowed - values smaller than this will automatically be
 /// coerced up to this value.
@@ -632,13 +631,12 @@ mod write {
 
 #[cfg(test)]
 mod tests {
-    use bytes::buf::FromBuf;
-    use bytes::Buf;
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
 
     use crate::error::SaltlickError;
     use crate::key;
+    use crate::multibuf::MultiBuf;
 
     use super::{Decrypter, Encrypter};
 
@@ -659,18 +657,18 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public.clone());
-        let mut ciphertext = Vec::new();
+        let mut ciphertext = MultiBuf::new();
         encrypter.set_block_size(1500);
         for block in test_data.iter() {
-            ciphertext.extend(encrypter.push(block, false).unwrap().iter())
+            ciphertext.extend(encrypter.push(block, false).unwrap())
         }
-        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap().iter());
+        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
 
         let mut decrypter = Decrypter::new(public, secret);
-        let plaintext = decrypter.pull(ciphertext).unwrap();
+        let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
         assert_eq!(
             test_data.into_iter().flatten().collect::<Vec<u8>>(),
-            Vec::from_buf(plaintext)
+            plaintext.into_vec()
         );
         assert!(decrypter.is_finalized());
     }
@@ -681,17 +679,17 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public.clone());
-        let mut ciphertext = Vec::new();
+        let mut ciphertext = MultiBuf::new();
         encrypter.set_block_size(500);
         for byte in test_data.iter() {
-            ciphertext.extend(encrypter.push(&[*byte], false).unwrap().iter())
+            ciphertext.extend(encrypter.push(&[*byte], false).unwrap())
         }
-        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap().iter());
+        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
 
         let mut decrypter = Decrypter::new(public, secret);
         let mut plaintext = Vec::new();
-        for byte in ciphertext {
-            plaintext.extend(Vec::from_buf(decrypter.pull(&[byte]).unwrap()));
+        for byte in ciphertext.into_vec() {
+            plaintext.extend(decrypter.pull(&[byte]).unwrap().into_vec());
         }
         assert_eq!(test_data, plaintext);
         assert!(decrypter.is_finalized());
@@ -703,13 +701,13 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public);
-        let mut ciphertext = Vec::new();
-        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
+        let mut ciphertext = MultiBuf::new();
+        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap());
 
         let mut decrypter = Decrypter::new_deferred(move |_public| Some(secret));
-        let plaintext = Vec::from_buf(decrypter.pull(&ciphertext[..]).unwrap());
+        let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
 
-        assert_eq!(test_data, plaintext);
+        assert_eq!(test_data, plaintext.into_vec());
         assert!(decrypter.is_finalized());
     }
 
@@ -719,13 +717,13 @@ mod tests {
         let (public, _secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public);
-        let mut ciphertext = Vec::new();
-        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap().iter());
+        let mut ciphertext = MultiBuf::new();
+        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap());
 
         let mut decrypter = Decrypter::new_deferred(move |_public| None);
         assert_eq!(
             SaltlickError::SecretKeyNotFound,
-            decrypter.pull(&ciphertext[..]).unwrap_err()
+            decrypter.pull(&ciphertext.into_vec()[..]).unwrap_err()
         );
     }
 }
