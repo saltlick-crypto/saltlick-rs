@@ -81,6 +81,7 @@ pub mod crypter;
 
 mod error;
 mod key;
+mod state;
 mod sync;
 mod version;
 

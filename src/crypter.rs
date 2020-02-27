@@ -48,6 +48,7 @@ use self::read::ReadStatus;
 use crate::{
     error::SaltlickError,
     key::{PublicKey, SecretKey},
+    state::{self, StateMachine},
     version::Version,
 };
 use byteorder::{ByteOrder, NetworkEndian};
@@ -70,20 +71,13 @@ const MAGIC: &[u8] = b"SALTLICK";
 const MAGIC_LEN: usize = 8;
 const MESSAGE_LEN_LEN: usize = secretstream::ABYTES + mem::size_of::<u32>();
 
-#[derive(Debug)]
-enum State<S, R, E: Clone> {
-    Next(S),
-    Return(R, S),
-    Error(E),
-    Empty,
-}
-
-enum EncrypterState {
+pub(crate) enum EncrypterState {
     Start,
     FlushOutput(Stream<Push>),
     NextBlock(Stream<Push>),
     GenBlock(Stream<Push>, bool),
     Finalized,
+    Errored,
 }
 
 impl fmt::Debug for EncrypterState {
@@ -95,6 +89,7 @@ impl fmt::Debug for EncrypterState {
             NextBlock(..) => write!(f, "EncrypterState::NextBlock"),
             GenBlock(..) => write!(f, "EncrypterState::GenBlock"),
             Finalized => write!(f, "EncrypterState::Finalized"),
+            Errored => write!(f, "EncrypterState::Errored"),
         }
     }
 }
@@ -156,7 +151,7 @@ pub struct Encrypter {
     enc_block: EncryptedBlock,
     plaintext: BytesMut,
     public_key: PublicKey,
-    state: State<EncrypterState, (usize, usize), SaltlickError>,
+    state: Option<EncrypterState>,
 }
 
 impl Encrypter {
@@ -172,7 +167,7 @@ impl Encrypter {
             },
             plaintext: BytesMut::new(),
             public_key,
-            state: State::Next(EncrypterState::Start),
+            state: Some(EncrypterState::Start),
         }
     }
 
@@ -196,64 +191,48 @@ impl Encrypter {
         use self::EncrypterState::*;
         let mut nread = 0;
         let mut nwritten = 0;
-        loop {
-            let next_inner = match mem::replace(&mut self.state, State::Empty) {
-                State::Next(next) => next,
-                State::Return(value, next) => {
-                    self.state = State::Next(next);
-                    return Ok(value);
+        state::turn(self, |next, self_| match next {
+            Start => {
+                let stream = self_.start()?;
+                state::next(FlushOutput(stream))
+            }
+            FlushOutput(stream) => {
+                if self_.enc_block.has_remaining() && output.is_empty() {
+                    state::ret((nread, nwritten), FlushOutput(stream))
+                } else if self_.enc_block.has_remaining() {
+                    let n = self_.enc_block.write(output);
+                    advance_slice_mut(&mut output, n);
+                    nwritten += n;
+                    state::next(FlushOutput(stream))
+                } else {
+                    self_.enc_block.clear();
+                    state::next(NextBlock(stream))
                 }
-                State::Error(e) => {
-                    self.state = State::Error(e.clone());
-                    return Err(e);
+            }
+            NextBlock(stream) => {
+                if self_.plaintext.len() >= self_.block_size {
+                    state::next(GenBlock(stream, false))
+                } else if !input.is_empty() {
+                    let take = cmp::min(input.len(), self_.block_size - self_.plaintext.len());
+                    self_.plaintext.extend_from_slice(&input[..take]);
+                    advance_slice(&mut input, take);
+                    nread += take;
+                    state::next(NextBlock(stream))
+                } else if finalize && !stream.is_finalized() {
+                    state::next(GenBlock(stream, true))
+                } else if finalize {
+                    state::ret((nread, nwritten), Finalized)
+                } else {
+                    state::ret((nread, nwritten), FlushOutput(stream))
                 }
-                State::Empty => panic!("Reached State::Empty - this is a bug!"),
-            };
-
-            let next_state = match next_inner {
-                Start => match self.start() {
-                    Ok(stream) => State::Next(FlushOutput(stream)),
-                    Err(e) => State::Error(e),
-                },
-                FlushOutput(stream) => {
-                    if self.enc_block.has_remaining() && output.is_empty() {
-                        State::Return((nread, nwritten), FlushOutput(stream))
-                    } else if self.enc_block.has_remaining() {
-                        let n = self.enc_block.write(output);
-                        advance_slice_mut(&mut output, n);
-                        nwritten += n;
-                        State::Next(FlushOutput(stream))
-                    } else {
-                        self.enc_block.clear();
-                        State::Next(NextBlock(stream))
-                    }
-                }
-                NextBlock(stream) => {
-                    if self.plaintext.len() >= self.block_size {
-                        State::Next(GenBlock(stream, false))
-                    } else if !input.is_empty() {
-                        let take = cmp::min(input.len(), self.block_size - self.plaintext.len());
-                        self.plaintext.extend_from_slice(&input[..take]);
-                        advance_slice(&mut input, take);
-                        nread += take;
-                        State::Next(NextBlock(stream))
-                    } else if finalize && !stream.is_finalized() {
-                        State::Next(GenBlock(stream, true))
-                    } else if finalize {
-                        State::Return((nread, nwritten), Finalized)
-                    } else {
-                        State::Return((nread, nwritten), FlushOutput(stream))
-                    }
-                }
-                GenBlock(mut stream, finalize) => match self.gen_block(&mut stream, finalize) {
-                    Ok(()) => State::Next(FlushOutput(stream)),
-                    Err(e) => State::Error(e),
-                },
-                Finalized => State::Return((nread, nwritten), Finalized),
-            };
-
-            self.state = next_state;
-        }
+            }
+            GenBlock(mut stream, finalize) => {
+                self_.gen_block(&mut stream, finalize)?;
+                state::next(FlushOutput(stream))
+            }
+            Finalized => state::ret((nread, nwritten), Finalized),
+            Errored => state::err(SaltlickError::StateMachineErrored),
+        })
     }
 
     /// Convenience version of `update` that allocates and returns output data
@@ -288,7 +267,7 @@ impl Encrypter {
     /// Returns true if the crypter has been finalized.
     pub fn is_finalized(&self) -> bool {
         match self.state {
-            State::Next(EncrypterState::Finalized) => true,
+            Some(EncrypterState::Finalized) => true,
             _ => false,
         }
     }
@@ -339,12 +318,30 @@ impl Encrypter {
     }
 }
 
+impl StateMachine for Encrypter {
+    type State = EncrypterState;
+    type Return = (usize, usize);
+    type Error = SaltlickError;
+
+    fn take_state(&mut self) -> Self::State {
+        if let Some(inner) = self.state.take() {
+            inner
+        } else {
+            EncrypterState::Errored
+        }
+    }
+
+    fn put_state(&mut self, state: Self::State) {
+        self.state = Some(state);
+    }
+}
+
 // This is a workaround to allow calling a Box<FnOnce> in Rust versions less
 // than 1.35. When the MSRV is 1.35 or greater, this can be removed and
 // replaced directly with `Box<dyn FnOnce(...)>`.
 //
 // Refer to https://github.com/rust-lang/rust/issues/28796 for more info.
-trait KeyLookupFn {
+pub(crate) trait KeyLookupFn {
     fn call_box(self: Box<Self>, public_key: &PublicKey) -> Option<SecretKey>;
 }
 
@@ -357,7 +354,7 @@ where
     }
 }
 
-enum KeyResolution {
+pub(crate) enum KeyResolution {
     Available(PublicKey, SecretKey),
     Deferred(Box<dyn KeyLookupFn>),
 }
@@ -372,7 +369,7 @@ impl fmt::Debug for KeyResolution {
     }
 }
 
-enum DecrypterState {
+pub(crate) enum DecrypterState {
     ReadPreheader(KeyResolution),
     ReadPublicKey(KeyResolution),
     SecretKeyLookup(PublicKey, Box<dyn KeyLookupFn>),
@@ -382,6 +379,7 @@ enum DecrypterState {
     ReadBlock(Stream<Pull>, usize),
     FlushOutput(Stream<Pull>, bool),
     Finalized,
+    Errored,
 }
 
 impl fmt::Debug for DecrypterState {
@@ -397,6 +395,7 @@ impl fmt::Debug for DecrypterState {
             ReadBlock(..) => write!(f, "DecrypterState::ReadBlock"),
             FlushOutput(..) => write!(f, "DecrypterState::FlushOutput"),
             Finalized => write!(f, "DecrypterState::Finalized"),
+            Errored => write!(f, "DecrypterState::Errored"),
         }
     }
 }
@@ -408,7 +407,7 @@ pub struct Decrypter {
     consumed: usize,
     last_block_size: Option<usize>,
     plaintext: Vec<u8>,
-    state: State<DecrypterState, (usize, usize), SaltlickError>,
+    state: Option<DecrypterState>,
 }
 
 impl Decrypter {
@@ -420,7 +419,7 @@ impl Decrypter {
             consumed: 0,
             last_block_size: None,
             plaintext: Vec::new(),
-            state: State::Next(DecrypterState::ReadPreheader(key)),
+            state: Some(DecrypterState::ReadPreheader(key)),
         }
     }
 
@@ -443,7 +442,7 @@ impl Decrypter {
             consumed: 0,
             last_block_size: None,
             plaintext: Vec::new(),
-            state: State::Next(DecrypterState::ReadPreheader(key)),
+            state: Some(DecrypterState::ReadPreheader(key)),
         }
     }
 
@@ -460,175 +459,145 @@ impl Decrypter {
         use self::DecrypterState::*;
         let mut nread = 0;
         let mut nwritten = 0;
-        loop {
-            let next_inner = match mem::replace(&mut self.state, State::Empty) {
-                State::Next(next) => next,
-                State::Return(value, next) => {
-                    self.state = State::Next(next);
-                    return Ok(value);
+        state::turn(self, |next, self_| match next {
+            ReadPreheader(key_resolution) => match read::preheader(&self_.ciphertext)? {
+                ReadStatus::Complete(version, n) => {
+                    self_.ciphertext.advance(n);
+                    if version != Version::V1 {
+                        state::err(SaltlickError::UnsupportedVersion)
+                    } else {
+                        state::next(ReadPublicKey(key_resolution))
+                    }
                 }
-                State::Error(e) => {
-                    self.state = State::Error(e.clone());
-                    return Err(e);
+                ReadStatus::Incomplete(_needed) if input.is_empty() => {
+                    state::ret((nread, nwritten), ReadPreheader(key_resolution))
                 }
-                State::Empty => panic!("Reached State::Empty - this is a bug!"),
-            };
-
-            let next_state = match next_inner {
-                ReadPreheader(key_resolution) => match read::preheader(&self.ciphertext) {
-                    Ok(ReadStatus::Complete(version, n)) => {
-                        self.ciphertext.advance(n);
-                        if version != Version::V1 {
-                            State::Error(SaltlickError::UnsupportedVersion)
-                        } else {
-                            State::Next(ReadPublicKey(key_resolution))
+                ReadStatus::Incomplete(needed) => {
+                    let take = cmp::min(needed, input.len());
+                    self_.ciphertext.extend_from_slice(&input[..take]);
+                    advance_slice(&mut input, take);
+                    nread += take;
+                    state::next(ReadPreheader(key_resolution))
+                }
+            },
+            ReadPublicKey(key_resolution) => match read::header_v1_public_key(&self_.ciphertext)? {
+                ReadStatus::Complete(file_public_key, n) => {
+                    self_.ciphertext.advance(n);
+                    match key_resolution {
+                        KeyResolution::Available(public_key, secret_key) => {
+                            state::next(ReadHeader(file_public_key, public_key, secret_key))
+                        }
+                        KeyResolution::Deferred(lookup_fn) => {
+                            state::next(SecretKeyLookup(file_public_key, lookup_fn))
                         }
                     }
-                    Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
-                        State::Return((nread, nwritten), ReadPreheader(key_resolution))
+                }
+                ReadStatus::Incomplete(_needed) if input.is_empty() => {
+                    state::ret((nread, nwritten), ReadPublicKey(key_resolution))
+                }
+                ReadStatus::Incomplete(needed) => {
+                    let take = cmp::min(needed, input.len());
+                    self_.ciphertext.extend_from_slice(&input[..take]);
+                    advance_slice(&mut input, take);
+                    nread += take;
+                    state::next(ReadPublicKey(key_resolution))
+                }
+            },
+            SecretKeyLookup(file_public_key, lookup_fn) => {
+                if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
+                    state::next(ReadHeader(
+                        file_public_key.clone(),
+                        file_public_key,
+                        secret_key,
+                    ))
+                } else {
+                    state::err(SaltlickError::SecretKeyNotFound)
+                }
+            }
+            ReadHeader(file_public_key, public_key, secret_key) => {
+                if file_public_key != public_key {
+                    return state::err(SaltlickError::PublicKeyMismatch);
+                }
+                match read::header_v1_sealed_text(&self_.ciphertext, &public_key, &secret_key)? {
+                    ReadStatus::Complete((key, header), n) => {
+                        self_.ciphertext.advance(n);
+                        state::next(OpenStream(key, header))
                     }
-                    Ok(ReadStatus::Incomplete(needed)) => {
+                    ReadStatus::Incomplete(_needed) if input.is_empty() => state::ret(
+                        (nread, nwritten),
+                        ReadHeader(file_public_key, public_key, secret_key),
+                    ),
+                    ReadStatus::Incomplete(needed) => {
                         let take = cmp::min(needed, input.len());
-                        self.ciphertext.extend_from_slice(&input[..take]);
+                        self_.ciphertext.extend_from_slice(&input[..take]);
                         advance_slice(&mut input, take);
                         nread += take;
-                        State::Next(ReadPreheader(key_resolution))
-                    }
-                    Err(e) => State::Error(e),
-                },
-                ReadPublicKey(key_resolution) => {
-                    match read::header_v1_public_key(&self.ciphertext) {
-                        Ok(ReadStatus::Complete(file_public_key, n)) => {
-                            self.ciphertext.advance(n);
-                            match key_resolution {
-                                KeyResolution::Available(public_key, secret_key) => {
-                                    State::Next(ReadHeader(file_public_key, public_key, secret_key))
-                                }
-                                KeyResolution::Deferred(lookup_fn) => {
-                                    State::Next(SecretKeyLookup(file_public_key, lookup_fn))
-                                }
-                            }
-                        }
-                        Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
-                            State::Return((nread, nwritten), ReadPublicKey(key_resolution))
-                        }
-                        Ok(ReadStatus::Incomplete(needed)) => {
-                            let take = cmp::min(needed, input.len());
-                            self.ciphertext.extend_from_slice(&input[..take]);
-                            advance_slice(&mut input, take);
-                            nread += take;
-                            State::Next(ReadPublicKey(key_resolution))
-                        }
-                        Err(e) => State::Error(e),
+                        state::next(ReadHeader(file_public_key, public_key, secret_key))
                     }
                 }
-                SecretKeyLookup(file_public_key, lookup_fn) => {
-                    if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
-                        State::Next(ReadHeader(
-                            file_public_key.clone(),
-                            file_public_key,
-                            secret_key,
-                        ))
-                    } else {
-                        State::Error(SaltlickError::SecretKeyNotFound)
-                    }
+            }
+            OpenStream(key, header) => match Stream::init_pull(&header, &key) {
+                Ok(stream) => state::next(ReadLength(stream)),
+                Err(()) => state::err(SaltlickError::DecryptionFailure),
+            },
+            ReadLength(mut stream) => match read::length(&self_.ciphertext, &mut stream)? {
+                ReadStatus::Complete(length, n) => {
+                    self_.ciphertext.advance(n);
+                    self_.last_block_size = Some(length);
+                    state::next(ReadBlock(stream, length))
                 }
-                ReadHeader(file_public_key, public_key, secret_key) => {
-                    if file_public_key != public_key {
-                        State::Error(SaltlickError::PublicKeyMismatch)
-                    } else {
-                        match read::header_v1_sealed_text(
-                            &self.ciphertext,
-                            &public_key,
-                            &secret_key,
-                        ) {
-                            Ok(ReadStatus::Complete((key, header), n)) => {
-                                self.ciphertext.advance(n);
-                                State::Next(OpenStream(key, header))
-                            }
-                            Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
-                                State::Return(
-                                    (nread, nwritten),
-                                    ReadHeader(file_public_key, public_key, secret_key),
-                                )
-                            }
-                            Ok(ReadStatus::Incomplete(needed)) => {
-                                let take = cmp::min(needed, input.len());
-                                self.ciphertext.extend_from_slice(&input[..take]);
-                                advance_slice(&mut input, take);
-                                nread += take;
-                                State::Next(ReadHeader(file_public_key, public_key, secret_key))
-                            }
-                            Err(e) => State::Error(e),
-                        }
-                    }
+                ReadStatus::Incomplete(_needed) if input.is_empty() => {
+                    state::ret((nread, nwritten), ReadLength(stream))
                 }
-                OpenStream(key, header) => match Stream::init_pull(&header, &key) {
-                    Ok(stream) => State::Next(ReadLength(stream)),
-                    Err(()) => State::Error(SaltlickError::DecryptionFailure),
-                },
-                ReadLength(mut stream) => match read::length(&self.ciphertext, &mut stream) {
-                    Ok(ReadStatus::Complete(length, n)) => {
-                        self.ciphertext.advance(n);
-                        self.last_block_size = Some(length);
-                        State::Next(ReadBlock(stream, length))
+                ReadStatus::Incomplete(needed) => {
+                    let take = cmp::min(needed, input.len());
+                    self_.ciphertext.extend_from_slice(&input[..take]);
+                    advance_slice(&mut input, take);
+                    nread += take;
+                    state::next(ReadLength(stream))
+                }
+            },
+            ReadBlock(mut stream, length) => {
+                match read::block(&self_.ciphertext, &mut self_.plaintext, &mut stream, length)? {
+                    ReadStatus::Complete(finalized, n) => {
+                        self_.ciphertext.advance(n);
+                        self_.consumed = 0;
+                        state::next(FlushOutput(stream, finalized))
                     }
-                    Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
-                        State::Return((nread, nwritten), ReadLength(stream))
+                    ReadStatus::Incomplete(_needed) if input.is_empty() => {
+                        state::ret((nread, nwritten), ReadBlock(stream, length))
                     }
-                    Ok(ReadStatus::Incomplete(needed)) => {
+                    ReadStatus::Incomplete(needed) => {
                         let take = cmp::min(needed, input.len());
-                        self.ciphertext.extend_from_slice(&input[..take]);
+                        self_.ciphertext.extend_from_slice(&input[..take]);
                         advance_slice(&mut input, take);
                         nread += take;
-                        State::Next(ReadLength(stream))
-                    }
-                    Err(e) => State::Error(e),
-                },
-                ReadBlock(mut stream, length) => {
-                    match read::block(&self.ciphertext, &mut self.plaintext, &mut stream, length) {
-                        Ok(ReadStatus::Complete(finalized, n)) => {
-                            self.ciphertext.advance(n);
-                            self.consumed = 0;
-                            State::Next(FlushOutput(stream, finalized))
-                        }
-                        Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
-                            State::Return((nread, nwritten), ReadBlock(stream, length))
-                        }
-                        Ok(ReadStatus::Incomplete(needed)) => {
-                            let take = cmp::min(needed, input.len());
-                            self.ciphertext.extend_from_slice(&input[..take]);
-                            advance_slice(&mut input, take);
-                            nread += take;
-                            State::Next(ReadBlock(stream, length))
-                        }
-                        Err(e) => State::Error(e),
+                        state::next(ReadBlock(stream, length))
                     }
                 }
-                FlushOutput(stream, finalized) => {
-                    if self.plaintext_len() == 0 {
-                        if finalized {
-                            State::Next(Finalized)
-                        } else {
-                            State::Next(ReadLength(stream))
-                        }
-                    } else if output.is_empty() {
-                        State::Return((nread, nwritten), FlushOutput(stream, finalized))
+            }
+            FlushOutput(stream, finalized) => {
+                if self_.plaintext_len() == 0 {
+                    if finalized {
+                        state::next(Finalized)
                     } else {
-                        let take = cmp::min(output.len(), self.plaintext_len());
-                        let n = output
-                            .write(&self.plaintext[self.consumed..(self.consumed + take)])
-                            .expect("write to slice is infallible");
-                        nwritten += n;
-                        self.consumed += n;
-                        State::Next(FlushOutput(stream, finalized))
+                        state::next(ReadLength(stream))
                     }
+                } else if output.is_empty() {
+                    state::ret((nread, nwritten), FlushOutput(stream, finalized))
+                } else {
+                    let take = cmp::min(output.len(), self_.plaintext_len());
+                    let n = output
+                        .write(&self_.plaintext[self_.consumed..(self_.consumed + take)])
+                        .expect("write to slice is infallible");
+                    nwritten += n;
+                    self_.consumed += n;
+                    state::next(FlushOutput(stream, finalized))
                 }
-                Finalized => State::Return((nread, nwritten), Finalized),
-            };
-
-            self.state = next_state;
-        }
+            }
+            Finalized => state::ret((nread, nwritten), Finalized),
+            Errored => state::err(SaltlickError::StateMachineErrored),
+        })
     }
 
     /// Convenience version of `update` that allocates and returns output data
@@ -652,7 +621,7 @@ impl Decrypter {
     /// Returns true if the crypter has been finalized.
     pub fn is_finalized(&self) -> bool {
         match self.state {
-            State::Next(DecrypterState::Finalized) => true,
+            Some(DecrypterState::Finalized) => true,
             _ => false,
         }
     }
@@ -668,6 +637,24 @@ impl Decrypter {
 
     fn plaintext_len(&self) -> usize {
         self.plaintext.len() - self.consumed
+    }
+}
+
+impl StateMachine for Decrypter {
+    type State = DecrypterState;
+    type Return = (usize, usize);
+    type Error = SaltlickError;
+
+    fn take_state(&mut self) -> Self::State {
+        if let Some(inner) = self.state.take() {
+            inner
+        } else {
+            DecrypterState::Errored
+        }
+    }
+
+    fn put_state(&mut self, state: Self::State) {
+        self.state = Some(state);
     }
 }
 
