@@ -35,7 +35,11 @@
 //! Next:
 //!
 //! ```
-//! use saltlick::{DecryptingReader, EncryptingWriter, SaltlickError};
+//! use saltlick::{
+//!     read::DecryptingReader,
+//!     write::EncryptingWriter,
+//!     SaltlickError,
+//! };
 //! use std::{
 //!     error::Error,
 //!     fs::File,
@@ -77,7 +81,10 @@
 //! openssl pkey -in secret.pem -pubout > public.pem
 //! ```
 
+pub mod bufread;
 pub mod crypter;
+pub mod read;
+pub mod write;
 
 mod error;
 mod key;
@@ -88,6 +95,5 @@ mod version;
 pub use self::{
     error::{SaltlickError, SaltlickKeyIoError},
     key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES},
-    sync::{DecryptingReader, EncryptingWriter},
     version::Version,
 };
