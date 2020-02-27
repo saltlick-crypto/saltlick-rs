@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Add `Encrypter` and `Decrypter` methods `update_to_vec`, which automatically
   allocates and fills a `Vec<u8>` for output.
-- Add `with_capacity` to `EncryptingWriter` and
-  `with_capacity`/`deferred_with_capacity` to `DecryptingReader` to allow
-  control of inner buffer sizes.
+- Add `with_capacity` to `SaltlickEncrypter` types and
+  `with_capacity`/`deferred_with_capacity` to `SaltlickDecrypter` types to
+  allow control of inner buffer sizes.
+- Wrappers now exist for all permutations of encrypt/decrypt and `Read`,
+  `Write`, and `BufRead`.
 
 ### Changed
 - `Encrypter` and `Decrypter` now reuses buffers for communicating with
