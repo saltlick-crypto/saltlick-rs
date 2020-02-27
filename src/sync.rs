@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{key::gen_keypair, read::DecryptingReader, write::EncryptingWriter};
+    use crate::{key::gen_keypair, read::SaltlickDecrypter, write::SaltlickEncrypter};
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use std::{
@@ -36,11 +36,11 @@ mod tests {
         ] {
             let random_data = random_bytes(0, *size);
             let (public_key, secret_key) = gen_keypair();
-            let mut encrypter = EncryptingWriter::new(public_key.clone(), Vec::new());
+            let mut encrypter = SaltlickEncrypter::new(public_key.clone(), Vec::new());
             encrypter.write_all(&random_data[..]).unwrap();
             let ciphertext = Cursor::new(encrypter.finalize().unwrap());
             let mut decrypter =
-                DecryptingReader::new(public_key.clone(), secret_key.clone(), ciphertext);
+                SaltlickDecrypter::new(public_key.clone(), secret_key.clone(), ciphertext);
             let mut output = Vec::new();
             decrypter.read_to_end(&mut output).unwrap();
         }
@@ -58,7 +58,7 @@ mod tests {
         ] {
             let random_data = random_bytes(0, *size);
             let (public_key, secret_key) = gen_keypair();
-            let mut encrypter = EncryptingWriter::new(public_key.clone(), Vec::new());
+            let mut encrypter = SaltlickEncrypter::new(public_key.clone(), Vec::new());
             encrypter.block_size(16 * 1024);
             let mut written = 0;
             // Take increasing chunks so we're varying chunk size.
@@ -72,7 +72,7 @@ mod tests {
             }
             let ciphertext = Cursor::new(encrypter.finalize().unwrap());
             let mut decrypter =
-                DecryptingReader::new(public_key.clone(), secret_key.clone(), ciphertext);
+                SaltlickDecrypter::new(public_key.clone(), secret_key.clone(), ciphertext);
             let mut output = Vec::new();
             decrypter.read_to_end(&mut output).unwrap();
         }
@@ -82,7 +82,7 @@ mod tests {
     fn corrupt_value_test() {
         let random_data = random_bytes(0, 100 * 1024);
         let (public_key, secret_key) = gen_keypair();
-        let mut encrypter = EncryptingWriter::new(public_key.clone(), Vec::new());
+        let mut encrypter = SaltlickEncrypter::new(public_key.clone(), Vec::new());
         encrypter.write_all(&random_data[..]).unwrap();
         let mut ciphertext = encrypter.finalize().unwrap();
 
@@ -90,7 +90,7 @@ mod tests {
         let index = ciphertext.len() - 5;
         ciphertext[index] = ciphertext[index].wrapping_add(1);
 
-        let mut decrypter = DecryptingReader::new(public_key, secret_key, Cursor::new(ciphertext));
+        let mut decrypter = SaltlickDecrypter::new(public_key, secret_key, Cursor::new(ciphertext));
         let mut output = Vec::new();
         assert!(decrypter.read_to_end(&mut output).is_err());
     }
@@ -99,14 +99,14 @@ mod tests {
     fn incomplete_stream_test() {
         let random_data = random_bytes(0, 100 * 1024);
         let (public_key, secret_key) = gen_keypair();
-        let mut encrypter = EncryptingWriter::new(public_key.clone(), Vec::new());
+        let mut encrypter = SaltlickEncrypter::new(public_key.clone(), Vec::new());
         encrypter.write_all(&random_data[..]).unwrap();
         let mut ciphertext = encrypter.finalize().unwrap();
 
         // Remove a few bytes from the end
         ciphertext.resize(ciphertext.len() - 5, 0);
 
-        let mut decrypter = DecryptingReader::new(public_key, secret_key, Cursor::new(ciphertext));
+        let mut decrypter = SaltlickDecrypter::new(public_key, secret_key, Cursor::new(ciphertext));
         let mut output = Vec::new();
         assert!(decrypter.read_to_end(&mut output).is_err());
     }

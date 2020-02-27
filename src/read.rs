@@ -29,7 +29,7 @@ const MIN_BUF_SIZE: usize = 1024;
 /// decryption successfully, as the libsodium crypto relies on an end-of-stream
 /// tag to provide guarantees of completeness.
 #[derive(Debug)]
-pub struct DecryptingReader<R: Read> {
+pub struct SaltlickDecrypter<R: Read> {
     available: usize,
     bufread: BufReader<R>,
     consumed: usize,
@@ -37,9 +37,9 @@ pub struct DecryptingReader<R: Read> {
     plaintext: Box<[u8]>,
 }
 
-impl<R: Read> DecryptingReader<R> {
+impl<R: Read> SaltlickDecrypter<R> {
     /// Create a new decryption layer over `reader` using `secret_key` and `public_key`.
-    pub fn new(public_key: PublicKey, secret_key: SecretKey, reader: R) -> DecryptingReader<R> {
+    pub fn new(public_key: PublicKey, secret_key: SecretKey, reader: R) -> SaltlickDecrypter<R> {
         Self::with_capacity(
             DEFAULT_BLOCK_SIZE,
             DEFAULT_BLOCK_SIZE,
@@ -51,7 +51,7 @@ impl<R: Read> DecryptingReader<R> {
 
     /// Create a new decryption layer over `reader`, using `lookup_fn` to match
     /// the stream's `public_key` to its `secret_key`.
-    pub fn new_deferred<F>(reader: R, lookup_fn: F) -> DecryptingReader<R>
+    pub fn new_deferred<F>(reader: R, lookup_fn: F) -> SaltlickDecrypter<R>
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
     {
@@ -65,10 +65,10 @@ impl<R: Read> DecryptingReader<R> {
         public_key: PublicKey,
         secret_key: SecretKey,
         reader: R,
-    ) -> DecryptingReader<R> {
+    ) -> SaltlickDecrypter<R> {
         let plaintext_capacity = cmp::max(plaintext_capacity, MIN_BUF_SIZE);
         let read_capacity = cmp::max(read_capacity, MIN_BUF_SIZE);
-        DecryptingReader {
+        SaltlickDecrypter {
             available: 0,
             bufread: BufReader::with_capacity(read_capacity, reader),
             consumed: 0,
@@ -84,13 +84,13 @@ impl<R: Read> DecryptingReader<R> {
         plaintext_capacity: usize,
         reader: R,
         lookup_fn: F,
-    ) -> DecryptingReader<R>
+    ) -> SaltlickDecrypter<R>
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
     {
         let plaintext_capacity = cmp::max(plaintext_capacity, MIN_BUF_SIZE);
         let read_capacity = cmp::max(read_capacity, MIN_BUF_SIZE);
-        DecryptingReader {
+        SaltlickDecrypter {
             available: 0,
             bufread: BufReader::with_capacity(read_capacity, reader),
             consumed: 0,
@@ -109,7 +109,7 @@ impl<R: Read> DecryptingReader<R> {
     }
 }
 
-impl<R: Read> Read for DecryptingReader<R> {
+impl<R: Read> Read for SaltlickDecrypter<R> {
     fn read(&mut self, mut output: &mut [u8]) -> io::Result<usize> {
         let mut nwritten = 0;
         loop {

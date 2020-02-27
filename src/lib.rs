@@ -36,8 +36,8 @@
 //!
 //! ```
 //! use saltlick::{
-//!     read::DecryptingReader,
-//!     write::EncryptingWriter,
+//!     read::SaltlickDecrypter,
+//!     write::SaltlickEncrypter,
 //!     SaltlickError,
 //! };
 //! use std::{
@@ -52,13 +52,13 @@
 //!
 //!     // Writing data to a stream
 //!     let writer = Vec::new();
-//!     let mut stream = EncryptingWriter::new(public.clone(), writer);
+//!     let mut stream = SaltlickEncrypter::new(public.clone(), writer);
 //!     stream.write_all(b"I have a secret for you")?;
 //!     let ciphertext = stream.finalize()?;
 //!
 //!     // Reading data back from stream
 //!     let reader = Cursor::new(ciphertext);
-//!     let mut stream = DecryptingReader::new(public.clone(), secret.clone(), reader);
+//!     let mut stream = SaltlickDecrypter::new(public.clone(), secret.clone(), reader);
 //!     let mut output = String::new();
 //!     stream.read_to_string(&mut output)?;
 //!     assert_eq!("I have a secret for you", output);

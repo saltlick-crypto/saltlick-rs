@@ -26,7 +26,7 @@ const DEFAULT_BUF_SIZE: usize = 32 * 1024;
 /// If writing fails during the stream, the entire stream must be discarded and
 /// started over, as the underlying crypto prevents restarting.
 #[derive(Debug)]
-pub struct EncryptingWriter<W: Write> {
+pub struct SaltlickEncrypter<W: Write> {
     available: usize,
     ciphertext: Box<[u8]>,
     consumed: usize,
@@ -35,17 +35,21 @@ pub struct EncryptingWriter<W: Write> {
     panicked: bool,
 }
 
-impl<W: Write> EncryptingWriter<W> {
+impl<W: Write> SaltlickEncrypter<W> {
     /// Create a new encryption layer over `writer` using `public_key`.
-    pub fn new(public_key: PublicKey, writer: W) -> EncryptingWriter<W> {
-        EncryptingWriter::with_capacity(DEFAULT_BUF_SIZE, public_key, writer)
+    pub fn new(public_key: PublicKey, writer: W) -> SaltlickEncrypter<W> {
+        SaltlickEncrypter::with_capacity(DEFAULT_BUF_SIZE, public_key, writer)
     }
 
     /// Create a new encryption layer over `writer` using `public_key` with the
     /// provided buffer `capacity`.
-    pub fn with_capacity(capacity: usize, public_key: PublicKey, writer: W) -> EncryptingWriter<W> {
+    pub fn with_capacity(
+        capacity: usize,
+        public_key: PublicKey,
+        writer: W,
+    ) -> SaltlickEncrypter<W> {
         let capacity = cmp::max(capacity, MIN_BUF_SIZE);
-        EncryptingWriter {
+        SaltlickEncrypter {
             available: 0,
             ciphertext: vec![0u8; capacity].into_boxed_slice(),
             consumed: 0,
@@ -62,7 +66,7 @@ impl<W: Write> EncryptingWriter<W> {
 
     /// Write any remaining ciphertext to the stream and finalize.
     ///
-    /// This will also be done automatically if the `EncryptingWriter` is
+    /// This will also be done automatically if the `SaltlickEncrypter` is
     /// dropped, but any errors will be silently discarded, which could mean
     /// the encrypted output is not properly finalized and therefore invalid.
     pub fn finalize(mut self) -> Result<W, io::Error> {
@@ -103,7 +107,7 @@ impl<W: Write> EncryptingWriter<W> {
     }
 }
 
-impl<W: Write> Write for EncryptingWriter<W> {
+impl<W: Write> Write for SaltlickEncrypter<W> {
     fn write(&mut self, input: &[u8]) -> io::Result<usize> {
         // All current ciphertext needs to be flushed before writing anything
         // new since we give `update` the whole buffer.
@@ -128,7 +132,7 @@ impl<W: Write> Write for EncryptingWriter<W> {
     }
 }
 
-impl<W: Write> Drop for EncryptingWriter<W> {
+impl<W: Write> Drop for SaltlickEncrypter<W> {
     fn drop(&mut self) {
         if self.inner.is_some() && !self.panicked {
             let (_, wr) = self

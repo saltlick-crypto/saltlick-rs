@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The methods `Encrypter::pull` and `Decrypter::push` are now called
   `Encrypter::update` and `Decrypter::update` and have changed function
   signatures.
+- `EncryptingWriter` and `DecryptingReader` have been moved into the `write`
+  and `read` modules respectively. They have been renamed `SaltlickEncrypter`
+  and `SaltlickDecrypter`.
 
 ### Removed
 - `MultiBuf` has been completely removed in favor of slices for input and
