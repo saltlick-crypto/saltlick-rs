@@ -289,9 +289,11 @@ pub fn gen_keypair() -> (PublicKey, SecretKey) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicKey, SecretKey, PUBLICKEYBYTES};
+    use super::{PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES};
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
+    use std::{fs::File, io::Write};
+    use tempdir::TempDir;
 
     const SECRET_KEY: &str = "-----BEGIN PRIVATE KEY-----
     MC4CAQAwBQYDK2VuBCIEIPi/trPNMJy8wbQtVl4oVR60m+7dFksCMU1CJHxQGtxo
@@ -330,6 +332,27 @@ mod tests {
     }
 
     #[test]
+    fn secret_key_from_raw_test() {
+        // Any SECRETKEYBYTES long value is a valid Curve25519 key
+        for seed in 1..100 {
+            let bytes = random_bytes(seed, SECRETKEYBYTES);
+            assert!(SecretKey::from_raw_curve25519(&bytes[..]).is_ok());
+        }
+    }
+
+    #[test]
+    fn invalid_secret_key_from_raw_test() {
+        let bytes = random_bytes(0, SECRETKEYBYTES - 1);
+        assert!(PublicKey::from_raw_curve25519(&bytes[..]).is_err());
+
+        let bytes = random_bytes(0, SECRETKEYBYTES + 1);
+        assert!(PublicKey::from_raw_curve25519(&bytes[..]).is_err());
+
+        let bytes = random_bytes(0, 0);
+        assert!(PublicKey::from_raw_curve25519(&bytes[..]).is_err());
+    }
+
+    #[test]
     fn public_key_pem_round_trip_test() {
         let expected_pem = pem::parse(PUBLIC_KEY).unwrap();
         let public_key = PublicKey::from_pem(PUBLIC_KEY).unwrap();
@@ -343,5 +366,76 @@ mod tests {
         let secret_key = SecretKey::from_pem(SECRET_KEY).unwrap();
         let actual_pem = pem::parse(secret_key.to_pem()).unwrap();
         assert_eq!(expected_pem, actual_pem);
+    }
+
+    #[test]
+    fn public_key_file_round_trip_test() {
+        let tmp_dir = TempDir::new("public_key").unwrap();
+        for seed in 1..100 {
+            let file_path = tmp_dir.path().join(format!("{}.pem", seed));
+            let bytes = random_bytes(seed, PUBLICKEYBYTES);
+            let public = PublicKey::from_raw_curve25519(&bytes[..]).unwrap();
+            public.to_file(&file_path).unwrap();
+            let from_file = PublicKey::from_file(&file_path).unwrap();
+            assert_eq!(public, from_file);
+        }
+    }
+
+    #[test]
+    fn secret_key_file_round_trip_test() {
+        let tmp_dir = TempDir::new("secret_key").unwrap();
+        for seed in 1..100 {
+            let file_path = tmp_dir.path().join(format!("{}.pem", seed));
+            let bytes = random_bytes(seed, SECRETKEYBYTES);
+            let secret = SecretKey::from_raw_curve25519(&bytes[..]).unwrap();
+            secret.to_file(&file_path).unwrap();
+            let from_file = SecretKey::from_file(&file_path).unwrap();
+            assert_eq!(secret, from_file);
+        }
+    }
+
+    #[test]
+    fn bad_public_key_file_test() {
+        let tmp_dir = TempDir::new("public_key").unwrap();
+        let file_path = tmp_dir.path().join("too_many.pem");
+        let bytes = random_bytes(0, PUBLICKEYBYTES + 1);
+        File::create(&file_path)
+            .unwrap()
+            .write_all(&bytes[..])
+            .unwrap();
+        assert!(PublicKey::from_file(&file_path).is_err());
+        let file_path = tmp_dir.path().join("too_few.pem");
+        let bytes = random_bytes(0, PUBLICKEYBYTES - 1);
+        File::create(&file_path)
+            .unwrap()
+            .write_all(&bytes[..])
+            .unwrap();
+        assert!(PublicKey::from_file(&file_path).is_err());
+    }
+
+    #[test]
+    fn bad_secret_key_file_test() {
+        let tmp_dir = TempDir::new("secret_key").unwrap();
+        let file_path = tmp_dir.path().join("too_many.pem");
+        let bytes = random_bytes(0, SECRETKEYBYTES + 1);
+        File::create(&file_path)
+            .unwrap()
+            .write_all(&bytes[..])
+            .unwrap();
+        assert!(SecretKey::from_file(&file_path).is_err());
+        let file_path = tmp_dir.path().join("too_few.pem");
+        let bytes = random_bytes(0, SECRETKEYBYTES - 1);
+        File::create(&file_path)
+            .unwrap()
+            .write_all(&bytes[..])
+            .unwrap();
+        assert!(SecretKey::from_file(&file_path).is_err());
+    }
+
+    #[test]
+    fn not_a_pem_test() {
+        let not_a_pem = "-----COMMENCE NOT A PEM-----";
+        assert!(PublicKey::from_pem(&not_a_pem).is_err());
+        assert!(SecretKey::from_pem(&not_a_pem).is_err());
     }
 }

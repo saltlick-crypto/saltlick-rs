@@ -71,6 +71,7 @@ const MAGIC: &[u8] = b"SALTLICK";
 const MAGIC_LEN: usize = 8;
 const MESSAGE_LEN_LEN: usize = secretstream::ABYTES + mem::size_of::<u32>();
 
+#[derive(strum_macros::AsRefStr)]
 pub(crate) enum EncrypterState {
     Start,
     FlushOutput(Stream<Push>),
@@ -82,15 +83,7 @@ pub(crate) enum EncrypterState {
 
 impl fmt::Debug for EncrypterState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::EncrypterState::*;
-        match self {
-            Start => write!(f, "EncrypterState::Start"),
-            FlushOutput(..) => write!(f, "EncrypterState::FlushOutput"),
-            NextBlock(..) => write!(f, "EncrypterState::NextBlock"),
-            GenBlock(..) => write!(f, "EncrypterState::GenBlock"),
-            Finalized => write!(f, "EncrypterState::Finalized"),
-            Errored => write!(f, "EncrypterState::Errored"),
-        }
+        f.write_str(self.as_ref())
     }
 }
 
@@ -338,6 +331,7 @@ impl StateMachine for Encrypter {
 
 type KeyLookupFn = Box<dyn FnOnce(&PublicKey) -> Option<SecretKey>>;
 
+#[derive(strum_macros::AsRefStr)]
 pub(crate) enum KeyResolution {
     Available(PublicKey, SecretKey),
     Deferred(KeyLookupFn),
@@ -345,14 +339,11 @@ pub(crate) enum KeyResolution {
 
 impl fmt::Debug for KeyResolution {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::KeyResolution::*;
-        match self {
-            Available(..) => write!(f, "KeyResolution::Available"),
-            Deferred(..) => write!(f, "KeyResolution::Deferred"),
-        }
+        f.write_str(self.as_ref())
     }
 }
 
+#[derive(strum_macros::AsRefStr)]
 pub(crate) enum DecrypterState {
     ReadPreheader(KeyResolution),
     ReadPublicKey(KeyResolution),
@@ -368,19 +359,7 @@ pub(crate) enum DecrypterState {
 
 impl fmt::Debug for DecrypterState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::DecrypterState::*;
-        match self {
-            ReadPreheader(..) => write!(f, "DecrypterState::ReadPreheader"),
-            ReadPublicKey(..) => write!(f, "DecrypterState::ReadPublicKey"),
-            SecretKeyLookup(..) => write!(f, "DecrypterState::SecretKeyLookup"),
-            ReadHeader(..) => write!(f, "DecrypterState::ReadHeader"),
-            OpenStream(..) => write!(f, "DecrypterState::OpenStream"),
-            ReadLength(..) => write!(f, "DecrypterState::ReadLength"),
-            ReadBlock(..) => write!(f, "DecrypterState::ReadBlock"),
-            FlushOutput(..) => write!(f, "DecrypterState::FlushOutput"),
-            Finalized => write!(f, "DecrypterState::Finalized"),
-            Errored => write!(f, "DecrypterState::Errored"),
-        }
+        f.write_str(self.as_ref())
     }
 }
 
@@ -793,7 +772,7 @@ mod write {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decrypter, Encrypter};
+    use super::{Decrypter, Encrypter, KeyResolution};
     use crate::{error::SaltlickError, key};
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
@@ -895,13 +874,10 @@ mod tests {
         let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
 
         let mut decrypter = Decrypter::new(other_public, other_secret);
-        match decrypter.update_to_vec(&ciphertext[..]) {
-            Err(SaltlickError::PublicKeyMismatch) => {}
-            other => panic!(
-                "Expected Err(SaltlickError::PublicKeyMismatch, got {:?}",
-                other
-            ),
-        }
+        assert_eq!(
+            SaltlickError::PublicKeyMismatch,
+            decrypter.update_to_vec(&ciphertext[..]).unwrap_err(),
+        );
     }
 
     #[test]
@@ -915,10 +891,49 @@ mod tests {
         // Corrupt the magic
         ciphertext[0..8].copy_from_slice(&b"PEPRLICK"[..]);
         let mut decrypter = Decrypter::new(public, secret);
-        match decrypter.update_to_vec(&ciphertext[..]) {
-            Err(SaltlickError::BadMagic) => {}
-            other => panic!("Expected Err(SaltlickError::BadMagic, got {:?}", other),
-        }
+        assert_eq!(
+            SaltlickError::BadMagic,
+            decrypter.update_to_vec(&ciphertext[..]).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn unsupported_version() {
+        let (public, secret) = key::gen_keypair();
+        let unsupported_version = b"SALTLICK\0";
+        let mut decrypter = Decrypter::new(public, secret);
+        assert_eq!(
+            SaltlickError::UnsupportedVersion,
+            decrypter
+                .update_to_vec(&unsupported_version[..])
+                .unwrap_err()
+        );
+    }
+
+    #[test]
+    fn update_after_error_test() {
+        let (public, secret) = key::gen_keypair();
+        let unsupported_version = b"SALTLICK\0";
+        let mut decrypter = Decrypter::new(public, secret);
+        // Cause an error (unsupported version)
+        decrypter
+            .update_to_vec(&unsupported_version[..])
+            .unwrap_err();
+        // Trying to update again should return `StateMachineErrored`
+        assert_eq!(
+            SaltlickError::StateMachineErrored,
+            decrypter.update_to_vec(&[]).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn update_after_finalized_test() {
+        let (public, _secret) = key::gen_keypair();
+        let mut encrypter = Encrypter::new(public);
+        let _ = encrypter.update_to_vec(b"Hello there", true).unwrap();
+        assert!(encrypter.is_finalized());
+        let _ = encrypter.update_to_vec(b"Are you finished?", true).unwrap();
+        assert!(encrypter.is_finalized());
     }
 
     #[test]
@@ -949,5 +964,17 @@ mod tests {
         let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
         assert!(decrypter.is_finalized());
         assert_eq!(expected, plaintext);
+    }
+
+    #[test]
+    fn debug_impl_test() {
+        let (public, secret) = key::gen_keypair();
+        let decrypter = Decrypter::new(public.clone(), secret.clone());
+        let encrypter = Encrypter::new(public.clone());
+        let key_resolution = KeyResolution::Available(public, secret);
+
+        let _ = format!("{:?}", decrypter);
+        let _ = format!("{:?}", encrypter);
+        let _ = format!("{:?}", key_resolution);
     }
 }
