@@ -1,5 +1,6 @@
-sudo: false
 language: rust
+os: linux
+dist: bionic
 
 stages:
   - check
@@ -8,44 +9,48 @@ stages:
 
 jobs:
   allow_failures:
-    - nightly
+    rust: nightly
   fast_finish: true
   include:
+
     - stage: check
       name: rustfmt
-      os: linux
-      rust: 1.39.0
+      rust: 1.41.1
       install:
         - rustup component add rustfmt
       script:
         - cargo fmt --all -- --check
     - name: "clippy-and-warnings"
       env: RUSTFLAGS="-D warnings"
-      os: linux
-      rust: 1.39.0
+      rust: 1.41.1
       install:
         - rustup component add clippy
       script:
-        - cargo clippy --all-features -- -D clippy::all
-        - cargo test --verbose
+        - cargo clippy --all-features --benches --bins --examples --tests -- -D clippy::all
+
+    - stage: test
+      rust: 1.39.0  # Oldest supported
+    - rust: stable
+      addons:
+        apt:
+          packages:
+            - libssl-dev
+      before_cache: |
+        bash <(curl https://raw.githubusercontent.com/xd009642/tarpaulin/master/travis-install.sh)
+      after_success: |
+        cargo tarpaulin --out Xml
+        bash <(curl -s https://codecov.io/bash)
+    - os: windows
+      rust: stable
+    - os: osx
+      rust: stable
+
     - stage: nightly
       name: nightly
-      os: linux
       rust: nightly
-      script:
-        - cargo test --verbose
-
-rust:
-  - 1.39.0  # Oldest supported
-  - stable
-
-os:
-  - linux
-  - osx
-  - windows
 
 script:
-  - cargo test --verbose
+  - cargo test
 
 cache:
   cargo: true
