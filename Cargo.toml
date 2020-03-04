@@ -23,7 +23,7 @@ bytes = "0.5"
 lazy_static = "1.0"
 pem = "0.7"
 simple_asn1 = "0.4"
-sodiumoxide = "0.2"
+sodiumoxide = "0.2.3"  # 0.2.3 required for `(push|pull)_to_vec`
 
 [dev-dependencies]
 rand = "0.7"

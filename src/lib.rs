@@ -14,10 +14,10 @@
 //! about the motivation and implementation of the file format itself.
 //!
 //! Both low-level and high-level APIs are provided. The low-level API requires
-//! manually pushing chunks of data into an encrypter and receiving ciphertext,
-//! or pulling plaintext from a decrypter that is fed chunks of ciphertext. The
-//! current high-level API implements Rust's [`Read`] and [`Write`] traits to
-//! provide a simple to use way to read and write files.
+//! manually updating an encrypter with chunks of plaintext and receiving
+//! ciphertext, or updating a decrypter with chunks of ciphertext and receiving
+//! plaintext. The current high-level API implements Rust's [`Read`] and
+//! [`Write`] traits to provide a simple to use way to read and write files.
 //!
 //! [saltlick spec]: https://github.com/saltlick-crypto/saltlick-spec
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
@@ -35,11 +35,12 @@
 //! Next:
 //!
 //! ```
-//! use std::error::Error;
-//! use std::fs::File;
-//! use std::io::{self, Cursor, Read, Write};
-//!
 //! use saltlick::{DecryptingReader, EncryptingWriter, SaltlickError};
+//! use std::{
+//!     error::Error,
+//!     fs::File,
+//!     io::{self, Cursor, Read, Write},
+//! };
 //!
 //! fn main() -> Result<(), Box<dyn Error>> {
 //!     // Generate a new public/secret keypair
@@ -80,11 +81,12 @@ pub mod crypter;
 
 mod error;
 mod key;
-mod multibuf;
 mod sync;
 mod version;
 
-pub use self::error::{SaltlickError, SaltlickKeyIoError};
-pub use self::key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES};
-pub use self::sync::{DecryptingReader, EncryptingWriter};
-pub use self::version::Version;
+pub use self::{
+    error::{SaltlickError, SaltlickKeyIoError},
+    key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES},
+    sync::{DecryptingReader, EncryptingWriter},
+    version::Version,
+};

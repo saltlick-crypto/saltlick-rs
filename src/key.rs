@@ -6,18 +6,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::Path;
-use std::str;
-
+use crate::error::{SaltlickError, SaltlickKeyIoError};
 use lazy_static::lazy_static;
 use pem;
 use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, BigUint, FromASN1, ToASN1, OID};
-use sodiumoxide::crypto::box_::PublicKey as SodiumPublicKey;
-use sodiumoxide::crypto::box_::SecretKey as SodiumSecretKey;
-
-use crate::error::{SaltlickError, SaltlickKeyIoError};
+use sodiumoxide::crypto::box_::{PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::Path,
+    str,
+};
 
 pub use sodiumoxide::crypto::box_::{self, PUBLICKEYBYTES, SECRETKEYBYTES};
 
@@ -290,10 +289,9 @@ pub fn gen_keypair() -> (PublicKey, SecretKey) {
 
 #[cfg(test)]
 mod tests {
+    use super::{PublicKey, SecretKey, PUBLICKEYBYTES};
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
-
-    use super::{PublicKey, SecretKey, PUBLICKEYBYTES};
 
     const SECRET_KEY: &str = "-----BEGIN PRIVATE KEY-----
     MC4CAQAwBQYDK2VuBCIEIPi/trPNMJy8wbQtVl4oVR60m+7dFksCMU1CJHxQGtxo

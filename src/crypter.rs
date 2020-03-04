@@ -6,57 +6,54 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Low-level API for push/pull implementations of crypto format.
+//! Low-level API for saltlick stream operations.
 //!
 //! # Example
 //!
 //! ```
-//! use saltlick::crypter::{Buf, Decrypter, Encrypter, MultiBuf};
+//! use saltlick::crypter::{Decrypter, Encrypter};
 //!
 //! let test_data = vec![vec![1, 2, 3], vec![4, 5, 6]];
 //!
 //! let (public, secret) = saltlick::gen_keypair();
 //!
-//! // Data is pushed into the crypter. Block sizes are handled automatically.
+//! // Data is fed into the encrypter. Chunking into blocks is handled
+//! // automatically.
 //! let mut encrypter = Encrypter::new(public.clone());
-//! let mut ciphertext = MultiBuf::new();
+//! let mut ciphertext = Vec::new();
 //! for block in test_data.iter() {
-//!     ciphertext.extend(encrypter.push(block, false).unwrap())
+//!     let encrypted_block = encrypter.update_to_vec(block, false).unwrap();
+//!     ciphertext.extend(encrypted_block);
 //! }
 //!
-//! // Once all data is written, the crypter must be manually finalized. After
-//! // this trying to add more data will result in an error. If the stream is not
-//! // finalized, decryption will fail as incomplete.
-//! ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
+//! // Once all data is written, the encrypter must be finalized. After
+//! // this trying to add more data will result in an error. If the encryption
+//! // stream is not finalized, decryption will fail as incomplete.
+//! let final_block = encrypter.update_to_vec(&[] as &[u8], true).unwrap();
+//! ciphertext.extend(final_block);
 //!
 //! // Decryption is the opposite of encrypting - feed chunks of ciphertext to
-//! // the `Decrypter::pull` function until `Decrypter::is_finalized` returns
-//! // true.
+//! // the decrypter until `Decrypter::is_finalized` returns true (or just give
+//! // the decrypter the full data set like we do here).
 //! let mut decrypter = Decrypter::new(public, secret);
-//! let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
+//! let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
+//! assert!(decrypter.is_finalized());
 //! assert_eq!(
 //!     test_data.into_iter().flatten().collect::<Vec<u8>>(),
-//!     plaintext.into_vec()
+//!     plaintext
 //! );
-//! assert!(decrypter.is_finalized());
 //! ```
 
-use std::cmp;
-use std::fmt;
-use std::mem;
-
-use byteorder::{ByteOrder, NetworkEndian};
-use bytes::BytesMut;
-use sodiumoxide::crypto::secretstream::{self, Header, Key, Pull, Push, Stream, Tag};
-
-use crate::error::SaltlickError;
-use crate::key::{PublicKey, SecretKey};
-use crate::version::Version;
-
 use self::read::ReadStatus;
-
-pub use crate::multibuf::MultiBuf;
-pub use bytes::{Buf, Bytes};
+use crate::{
+    error::SaltlickError,
+    key::{PublicKey, SecretKey},
+    version::Version,
+};
+use byteorder::{ByteOrder, NetworkEndian};
+use bytes::{Buf, BytesMut};
+use sodiumoxide::crypto::secretstream::{self, Header, Key, Pull, Push, Stream, Tag};
+use std::{cmp, fmt, io::Write, mem};
 
 /// Minimum block size allowed - values smaller than this will automatically be
 /// coerced up to this value.
@@ -83,9 +80,9 @@ enum State<S, R, E: Clone> {
 
 enum EncrypterState {
     Start,
-    NextBlock(MultiBuf, Stream<Push>),
-    WriteBlock(MultiBuf, Stream<Push>),
-    Finalize(MultiBuf, Stream<Push>),
+    FlushOutput(Stream<Push>),
+    NextBlock(Stream<Push>),
+    GenBlock(Stream<Push>, bool),
     Finalized,
 }
 
@@ -94,11 +91,61 @@ impl fmt::Debug for EncrypterState {
         use self::EncrypterState::*;
         match self {
             Start => write!(f, "EncrypterState::Start"),
-            NextBlock(_, _) => write!(f, "EncrypterState::NextBlock"),
-            WriteBlock(_, _) => write!(f, "EncrypterState::WriteBlock"),
-            Finalize(_, _) => write!(f, "EncrypterState::Finalize"),
+            FlushOutput(..) => write!(f, "EncrypterState::FlushOutput"),
+            NextBlock(..) => write!(f, "EncrypterState::NextBlock"),
+            GenBlock(..) => write!(f, "EncrypterState::GenBlock"),
             Finalized => write!(f, "EncrypterState::Finalized"),
         }
+    }
+}
+
+// Each encrypted block is made up of an encrypted size field of fixed size,
+// followed by an encrypted block with a decrypted length matching the value of
+// the preceeding size. This struct is a convenience for handling writing out
+// both parts.
+#[derive(Debug)]
+struct EncryptedBlock {
+    data: Vec<u8>,
+    data_pos: usize,
+    length: Vec<u8>,
+    length_pos: usize,
+}
+
+impl EncryptedBlock {
+    pub fn has_remaining(&self) -> bool {
+        (self.data.len() - self.data_pos > 0) || (self.length.len() - self.length_pos > 0)
+    }
+
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.data_pos = 0;
+        self.length.clear();
+        self.length_pos = 0;
+    }
+
+    pub fn write(&mut self, mut buf: &mut [u8]) -> usize {
+        let mut nwritten = 0;
+        while self.has_remaining() && !buf.is_empty() {
+            let size_len = self.length.len() - self.length_pos;
+            if size_len > 0 {
+                let end = self.length_pos + cmp::min(size_len, buf.len());
+                let n = buf
+                    .write(&self.length[self.length_pos..end])
+                    .expect("write to slice is infallible");
+                self.length_pos += n;
+                nwritten += n;
+                continue;
+            }
+
+            let end = self.data_pos + cmp::min(self.data.len() - self.data_pos, buf.len());
+            let n = buf
+                .write(&self.data[self.data_pos..end])
+                .expect("write to slice is infallible");
+            self.data_pos += n;
+            nwritten += n;
+        }
+
+        nwritten
     }
 }
 
@@ -106,22 +153,27 @@ impl fmt::Debug for EncrypterState {
 #[derive(Debug)]
 pub struct Encrypter {
     block_size: usize,
+    enc_block: EncryptedBlock,
     plaintext: BytesMut,
     public_key: PublicKey,
-    state: State<EncrypterState, MultiBuf, SaltlickError>,
+    state: State<EncrypterState, (usize, usize), SaltlickError>,
 }
 
 impl Encrypter {
     /// Create a new encrypter using the provided public key.
     pub fn new(public_key: PublicKey) -> Encrypter {
-        let mut encrypter = Encrypter {
-            block_size: 0,
+        Encrypter {
+            block_size: DEFAULT_BLOCK_SIZE,
+            enc_block: EncryptedBlock {
+                data: Vec::new(),
+                data_pos: 0,
+                length: Vec::new(),
+                length_pos: 0,
+            },
             plaintext: BytesMut::new(),
             public_key,
             state: State::Next(EncrypterState::Start),
-        };
-        encrypter.set_block_size(DEFAULT_BLOCK_SIZE);
-        encrypter
+        }
     }
 
     /// Set block size for encrypter.
@@ -130,15 +182,20 @@ impl Encrypter {
         self.block_size = block_size;
     }
 
-    /// Push plaintext to the encrypter, receiving encrypted ciphertext in
-    /// return.
-    pub fn push(
+    /// Update encrypter with plaintext input, receiving encrypted ciphertext
+    /// as output.
+    ///
+    /// Update encrypter with plaintext `input`, receiving encrypted ciphertext
+    /// in `output`. Returns a tuple of bytes read / bytes written.
+    pub fn update(
         &mut self,
-        plaintext: impl AsRef<[u8]>,
+        mut input: &[u8],
+        mut output: &mut [u8],
         finalize: bool,
-    ) -> Result<MultiBuf, SaltlickError> {
+    ) -> Result<(usize, usize), SaltlickError> {
         use self::EncrypterState::*;
-        self.plaintext.extend_from_slice(plaintext.as_ref());
+        let mut nread = 0;
+        let mut nwritten = 0;
         loop {
             let next_inner = match mem::replace(&mut self.state, State::Empty) {
                 State::Next(next) => next,
@@ -155,41 +212,77 @@ impl Encrypter {
 
             let next_state = match next_inner {
                 Start => match self.start() {
-                    Ok((stream, header)) => {
-                        let mut output = MultiBuf::new();
-                        output.push(header);
-                        State::Next(NextBlock(output, stream))
-                    }
+                    Ok(stream) => State::Next(FlushOutput(stream)),
                     Err(e) => State::Error(e),
                 },
-                NextBlock(output, stream) => {
-                    if self.plaintext.len() >= self.block_size {
-                        State::Next(WriteBlock(output, stream))
-                    } else if finalize {
-                        State::Next(Finalize(output, stream))
+                FlushOutput(stream) => {
+                    if self.enc_block.has_remaining() && output.is_empty() {
+                        State::Return((nread, nwritten), FlushOutput(stream))
+                    } else if self.enc_block.has_remaining() {
+                        let n = self.enc_block.write(output);
+                        advance_slice_mut(&mut output, n);
+                        nwritten += n;
+                        State::Next(FlushOutput(stream))
                     } else {
-                        State::Return(output, NextBlock(MultiBuf::new(), stream))
+                        self.enc_block.clear();
+                        State::Next(NextBlock(stream))
                     }
                 }
-                WriteBlock(mut output, mut stream) => match self.write_block(&mut stream, false) {
-                    Ok(buf) => {
-                        output.extend(buf);
-                        State::Next(NextBlock(output, stream))
+                NextBlock(stream) => {
+                    if self.plaintext.len() >= self.block_size {
+                        State::Next(GenBlock(stream, false))
+                    } else if !input.is_empty() {
+                        let take = cmp::min(input.len(), self.block_size - self.plaintext.len());
+                        self.plaintext.extend_from_slice(&input[..take]);
+                        advance_slice(&mut input, take);
+                        nread += take;
+                        State::Next(NextBlock(stream))
+                    } else if finalize && !stream.is_finalized() {
+                        State::Next(GenBlock(stream, true))
+                    } else if finalize {
+                        State::Return((nread, nwritten), Finalized)
+                    } else {
+                        State::Return((nread, nwritten), FlushOutput(stream))
                     }
+                }
+                GenBlock(mut stream, finalize) => match self.gen_block(&mut stream, finalize) {
+                    Ok(()) => State::Next(FlushOutput(stream)),
                     Err(e) => State::Error(e),
                 },
-                Finalize(mut output, mut stream) => match self.write_block(&mut stream, true) {
-                    Ok(buf) => {
-                        output.extend(buf);
-                        State::Return(output, Finalized)
-                    }
-                    Err(e) => State::Error(e),
-                },
-                Finalized => State::Error(SaltlickError::Finalized),
+                Finalized => State::Return((nread, nwritten), Finalized),
             };
 
             self.state = next_state;
         }
+    }
+
+    /// Convenience version of `update` that allocates and returns output data
+    /// as a `Vec<u8>`.
+    pub fn update_to_vec(
+        &mut self,
+        input: impl AsRef<[u8]>,
+        finalize: bool,
+    ) -> Result<Vec<u8>, SaltlickError> {
+        let mut nwritten = 0;
+        let mut input = input.as_ref();
+        let mut ciphertext = vec![0u8; self.estimate_output_size(input.len())];
+        loop {
+            let (rd, wr) = self.update(input, &mut ciphertext[nwritten..], finalize)?;
+            advance_slice(&mut input, rd);
+            nwritten += wr;
+            if self.is_finalized() || (!finalize && input.is_empty()) {
+                break;
+            } else {
+                // This case should be very rare and only occur when there are
+                // changes to the block size mid-stream.
+                ciphertext.resize(
+                    ciphertext.len() + self.estimate_output_size(input.len()),
+                    0u8,
+                );
+            }
+        }
+        ciphertext.truncate(nwritten);
+        Ok(ciphertext)
     }
 
     /// Returns true if the crypter has been finalized.
@@ -205,36 +298,44 @@ impl Encrypter {
         !self.is_finalized()
     }
 
-    fn start(&self) -> Result<(Stream<Push>, Vec<u8>), SaltlickError> {
+    fn start(&mut self) -> Result<Stream<Push>, SaltlickError> {
         let key = secretstream::gen_key();
         let (stream, header) =
             Stream::init_push(&key).map_err(|()| SaltlickError::StreamStartFailure)?;
-        Ok((stream, write::header_v1(&key, &header, &self.public_key)))
+        self.enc_block.clear();
+        self.enc_block.data = write::header_v1(&key, &header, &self.public_key);
+        Ok(stream)
     }
 
-    fn write_block(
+    fn gen_block(
         &mut self,
         stream: &mut Stream<Push>,
         finalize: bool,
-    ) -> Result<MultiBuf, SaltlickError> {
-        let mut output = MultiBuf::new();
-        let message = self
+    ) -> Result<(), SaltlickError> {
+        let msg = self
             .plaintext
             .split_to(cmp::min(self.plaintext.len(), self.block_size));
         let mut block_size_buf = [0u8; 4];
-        NetworkEndian::write_u32(&mut block_size_buf[..], message.len() as u32);
-        output.push(
-            stream
-                .push(&block_size_buf[..], None, Tag::Message)
-                .map_err(|()| SaltlickError::Finalized)?,
-        );
+        NetworkEndian::write_u32(&mut block_size_buf[..], msg.len() as u32);
+        self.enc_block.clear();
+        stream
+            .push_to_vec(
+                &block_size_buf[..],
+                None,
+                Tag::Message,
+                &mut self.enc_block.length,
+            )
+            .map_err(|()| SaltlickError::Finalized)?;
         let tag = if finalize { Tag::Final } else { Tag::Message };
-        output.push(
-            stream
-                .push(&message[..], None, tag)
-                .map_err(|()| SaltlickError::Finalized)?,
-        );
-        Ok(output)
+        stream
+            .push_to_vec(&msg[..], None, tag, &mut self.enc_block.data)
+            .map_err(|()| SaltlickError::Finalized)?;
+        Ok(())
+    }
+
+    fn estimate_output_size(&self, input_len: usize) -> usize {
+        let nblocks = input_len / self.block_size + 2;
+        nblocks * (self.block_size + MESSAGE_LEN_LEN + secretstream::ABYTES)
     }
 }
 
@@ -265,21 +366,21 @@ impl fmt::Debug for KeyResolution {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::KeyResolution::*;
         match self {
-            Available(_, _) => write!(f, "KeyResolution::Available"),
-            Deferred(_) => write!(f, "KeyResolution::Deferred"),
+            Available(..) => write!(f, "KeyResolution::Available"),
+            Deferred(..) => write!(f, "KeyResolution::Deferred"),
         }
     }
 }
 
 enum DecrypterState {
-    ReadPreheader(MultiBuf, KeyResolution),
-    ReadPublicKey(MultiBuf, KeyResolution),
-    SecretKeyLookup(MultiBuf, PublicKey, Box<dyn KeyLookupFn>),
-    ReadHeader(MultiBuf, PublicKey, PublicKey, SecretKey),
-    OpenStream(MultiBuf, Key, Header),
-    ReadLength(MultiBuf, Stream<Pull>),
-    ReadBlock(MultiBuf, Stream<Pull>, usize),
-    FinalBlock(MultiBuf),
+    ReadPreheader(KeyResolution),
+    ReadPublicKey(KeyResolution),
+    SecretKeyLookup(PublicKey, Box<dyn KeyLookupFn>),
+    ReadHeader(PublicKey, PublicKey, SecretKey),
+    OpenStream(Key, Header),
+    ReadLength(Stream<Pull>),
+    ReadBlock(Stream<Pull>, usize),
+    FlushOutput(Stream<Pull>, bool),
     Finalized,
 }
 
@@ -287,14 +388,14 @@ impl fmt::Debug for DecrypterState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::DecrypterState::*;
         match self {
-            ReadPreheader(_, _) => write!(f, "DecrypterState::ReadPreheader"),
-            ReadPublicKey(_, _) => write!(f, "DecrypterState::ReadPublicKey"),
-            SecretKeyLookup(_, _, _) => write!(f, "DecrypterState::SecretKeyLookup"),
-            ReadHeader(_, _, _, _) => write!(f, "DecrypterState::ReadHeader"),
-            OpenStream(_, _, _) => write!(f, "DecrypterState::OpenStream"),
-            ReadLength(_, _) => write!(f, "DecrypterState::ReadLength"),
-            ReadBlock(_, _, _) => write!(f, "DecrypterState::ReadBlock"),
-            FinalBlock(_) => write!(f, "DecrypterState::FinalBlock"),
+            ReadPreheader(..) => write!(f, "DecrypterState::ReadPreheader"),
+            ReadPublicKey(..) => write!(f, "DecrypterState::ReadPublicKey"),
+            SecretKeyLookup(..) => write!(f, "DecrypterState::SecretKeyLookup"),
+            ReadHeader(..) => write!(f, "DecrypterState::ReadHeader"),
+            OpenStream(..) => write!(f, "DecrypterState::OpenStream"),
+            ReadLength(..) => write!(f, "DecrypterState::ReadLength"),
+            ReadBlock(..) => write!(f, "DecrypterState::ReadBlock"),
+            FlushOutput(..) => write!(f, "DecrypterState::FlushOutput"),
             Finalized => write!(f, "DecrypterState::Finalized"),
         }
     }
@@ -304,7 +405,10 @@ impl fmt::Debug for DecrypterState {
 #[derive(Debug)]
 pub struct Decrypter {
     ciphertext: BytesMut,
-    state: State<DecrypterState, MultiBuf, SaltlickError>,
+    consumed: usize,
+    last_block_size: Option<usize>,
+    plaintext: Vec<u8>,
+    state: State<DecrypterState, (usize, usize), SaltlickError>,
 }
 
 impl Decrypter {
@@ -313,7 +417,10 @@ impl Decrypter {
         let key = KeyResolution::Available(public_key, secret_key);
         Decrypter {
             ciphertext: BytesMut::new(),
-            state: State::Next(DecrypterState::ReadPreheader(MultiBuf::new(), key)),
+            consumed: 0,
+            last_block_size: None,
+            plaintext: Vec::new(),
+            state: State::Next(DecrypterState::ReadPreheader(key)),
         }
     }
 
@@ -325,7 +432,7 @@ impl Decrypter {
     /// encrypt the file. The lookup function should return the secret key
     /// corresponding to the given public key, or `None` if no appropriate key
     /// is available. In this case, the Decrypter will return a
-    /// `SaltlickError::SecretKeyNotFound` error from `pull`.
+    /// `SaltlickError::SecretKeyNotFound` error from `update`.
     pub fn new_deferred<F>(lookup_fn: F) -> Decrypter
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
@@ -333,16 +440,26 @@ impl Decrypter {
         let key = KeyResolution::Deferred(Box::new(lookup_fn));
         Decrypter {
             ciphertext: BytesMut::new(),
-            state: State::Next(DecrypterState::ReadPreheader(MultiBuf::new(), key)),
+            consumed: 0,
+            last_block_size: None,
+            plaintext: Vec::new(),
+            state: State::Next(DecrypterState::ReadPreheader(key)),
         }
     }
 
-    /// Pull ciphertext "through" the decrypter, receiving decrypted plaintext
-    /// in return.
-    pub fn pull(&mut self, ciphertext: impl AsRef<[u8]>) -> Result<MultiBuf, SaltlickError> {
+    /// Update decrypter with ciphertext input, receiving decrypted plaintext
+    /// as output.
+    ///
+    /// Update decrypter with ciphertext `input`, receiving decrypted plaintext
+    /// as `output`. Returns a tuple of bytes read / bytes written.
+    pub fn update(
+        &mut self,
+        mut input: &[u8],
+        mut output: &mut [u8],
+    ) -> Result<(usize, usize), SaltlickError> {
         use self::DecrypterState::*;
-        use self::KeyResolution::*;
-        self.ciphertext.extend_from_slice(ciphertext.as_ref());
+        let mut nread = 0;
+        let mut nwritten = 0;
         loop {
             let next_inner = match mem::replace(&mut self.state, State::Empty) {
                 State::Next(next) => next,
@@ -358,46 +475,56 @@ impl Decrypter {
             };
 
             let next_state = match next_inner {
-                ReadPreheader(output, key_resolution) => match read::preheader(&self.ciphertext) {
+                ReadPreheader(key_resolution) => match read::preheader(&self.ciphertext) {
                     Ok(ReadStatus::Complete(version, n)) => {
                         self.ciphertext.advance(n);
                         if version != Version::V1 {
                             State::Error(SaltlickError::UnsupportedVersion)
                         } else {
-                            State::Next(ReadPublicKey(output, key_resolution))
+                            State::Next(ReadPublicKey(key_resolution))
                         }
                     }
-                    Ok(ReadStatus::Incomplete(_needed)) => {
-                        State::Return(output, ReadPreheader(MultiBuf::new(), key_resolution))
+                    Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
+                        State::Return((nread, nwritten), ReadPreheader(key_resolution))
+                    }
+                    Ok(ReadStatus::Incomplete(needed)) => {
+                        let take = cmp::min(needed, input.len());
+                        self.ciphertext.extend_from_slice(&input[..take]);
+                        advance_slice(&mut input, take);
+                        nread += take;
+                        State::Next(ReadPreheader(key_resolution))
                     }
                     Err(e) => State::Error(e),
                 },
-                ReadPublicKey(output, key_resolution) => {
+                ReadPublicKey(key_resolution) => {
                     match read::header_v1_public_key(&self.ciphertext) {
                         Ok(ReadStatus::Complete(file_public_key, n)) => {
                             self.ciphertext.advance(n);
                             match key_resolution {
-                                Available(public_key, secret_key) => State::Next(ReadHeader(
-                                    output,
-                                    file_public_key,
-                                    public_key,
-                                    secret_key,
-                                )),
-                                Deferred(lookup_fn) => {
-                                    State::Next(SecretKeyLookup(output, file_public_key, lookup_fn))
+                                KeyResolution::Available(public_key, secret_key) => {
+                                    State::Next(ReadHeader(file_public_key, public_key, secret_key))
+                                }
+                                KeyResolution::Deferred(lookup_fn) => {
+                                    State::Next(SecretKeyLookup(file_public_key, lookup_fn))
                                 }
                             }
                         }
-                        Ok(ReadStatus::Incomplete(_needed)) => {
-                            State::Return(output, ReadPublicKey(MultiBuf::new(), key_resolution))
+                        Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
+                            State::Return((nread, nwritten), ReadPublicKey(key_resolution))
+                        }
+                        Ok(ReadStatus::Incomplete(needed)) => {
+                            let take = cmp::min(needed, input.len());
+                            self.ciphertext.extend_from_slice(&input[..take]);
+                            advance_slice(&mut input, take);
+                            nread += take;
+                            State::Next(ReadPublicKey(key_resolution))
                         }
                         Err(e) => State::Error(e),
                     }
                 }
-                SecretKeyLookup(output, file_public_key, lookup_fn) => {
+                SecretKeyLookup(file_public_key, lookup_fn) => {
                     if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
                         State::Next(ReadHeader(
-                            output,
                             file_public_key.clone(),
                             file_public_key,
                             secret_key,
@@ -406,7 +533,7 @@ impl Decrypter {
                         State::Error(SaltlickError::SecretKeyNotFound)
                     }
                 }
-                ReadHeader(output, file_public_key, public_key, secret_key) => {
+                ReadHeader(file_public_key, public_key, secret_key) => {
                     if file_public_key != public_key {
                         State::Error(SaltlickError::PublicKeyMismatch)
                     } else {
@@ -417,59 +544,109 @@ impl Decrypter {
                         ) {
                             Ok(ReadStatus::Complete((key, header), n)) => {
                                 self.ciphertext.advance(n);
-                                State::Next(OpenStream(output, key, header))
+                                State::Next(OpenStream(key, header))
                             }
-                            Ok(ReadStatus::Incomplete(_needed)) => State::Return(
-                                output,
-                                ReadHeader(
-                                    MultiBuf::new(),
-                                    file_public_key,
-                                    public_key,
-                                    secret_key,
-                                ),
-                            ),
+                            Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
+                                State::Return(
+                                    (nread, nwritten),
+                                    ReadHeader(file_public_key, public_key, secret_key),
+                                )
+                            }
+                            Ok(ReadStatus::Incomplete(needed)) => {
+                                let take = cmp::min(needed, input.len());
+                                self.ciphertext.extend_from_slice(&input[..take]);
+                                advance_slice(&mut input, take);
+                                nread += take;
+                                State::Next(ReadHeader(file_public_key, public_key, secret_key))
+                            }
                             Err(e) => State::Error(e),
                         }
                     }
                 }
-                OpenStream(output, key, header) => match Stream::init_pull(&header, &key) {
-                    Ok(stream) => State::Next(ReadLength(output, stream)),
+                OpenStream(key, header) => match Stream::init_pull(&header, &key) {
+                    Ok(stream) => State::Next(ReadLength(stream)),
                     Err(()) => State::Error(SaltlickError::DecryptionFailure),
                 },
-                ReadLength(output, mut stream) => match read::length(&self.ciphertext, &mut stream)
-                {
+                ReadLength(mut stream) => match read::length(&self.ciphertext, &mut stream) {
                     Ok(ReadStatus::Complete(length, n)) => {
                         self.ciphertext.advance(n);
-                        State::Next(ReadBlock(output, stream, length))
+                        self.last_block_size = Some(length);
+                        State::Next(ReadBlock(stream, length))
                     }
-                    Ok(ReadStatus::Incomplete(_needed)) => {
-                        State::Return(output, ReadLength(MultiBuf::new(), stream))
+                    Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
+                        State::Return((nread, nwritten), ReadLength(stream))
+                    }
+                    Ok(ReadStatus::Incomplete(needed)) => {
+                        let take = cmp::min(needed, input.len());
+                        self.ciphertext.extend_from_slice(&input[..take]);
+                        advance_slice(&mut input, take);
+                        nread += take;
+                        State::Next(ReadLength(stream))
                     }
                     Err(e) => State::Error(e),
                 },
-                ReadBlock(mut output, mut stream, length) => {
-                    match read::block(&self.ciphertext, &mut stream, length) {
-                        Ok(ReadStatus::Complete((plaintext, finalized), n)) => {
+                ReadBlock(mut stream, length) => {
+                    match read::block(&self.ciphertext, &mut self.plaintext, &mut stream, length) {
+                        Ok(ReadStatus::Complete(finalized, n)) => {
                             self.ciphertext.advance(n);
-                            output.push(plaintext);
-                            if finalized {
-                                State::Next(FinalBlock(output))
-                            } else {
-                                State::Next(ReadLength(output, stream))
-                            }
+                            self.consumed = 0;
+                            State::Next(FlushOutput(stream, finalized))
                         }
-                        Ok(ReadStatus::Incomplete(_needed)) => {
-                            State::Return(output, ReadBlock(MultiBuf::new(), stream, length))
+                        Ok(ReadStatus::Incomplete(_needed)) if input.is_empty() => {
+                            State::Return((nread, nwritten), ReadBlock(stream, length))
+                        }
+                        Ok(ReadStatus::Incomplete(needed)) => {
+                            let take = cmp::min(needed, input.len());
+                            self.ciphertext.extend_from_slice(&input[..take]);
+                            advance_slice(&mut input, take);
+                            nread += take;
+                            State::Next(ReadBlock(stream, length))
                         }
                         Err(e) => State::Error(e),
                     }
                 }
-                FinalBlock(output) => State::Return(output, Finalized),
-                Finalized => State::Error(SaltlickError::Finalized),
+                FlushOutput(stream, finalized) => {
+                    if self.plaintext_len() == 0 {
+                        if finalized {
+                            State::Next(Finalized)
+                        } else {
+                            State::Next(ReadLength(stream))
+                        }
+                    } else if output.is_empty() {
+                        State::Return((nread, nwritten), FlushOutput(stream, finalized))
+                    } else {
+                        let take = cmp::min(output.len(), self.plaintext_len());
+                        let n = output
+                            .write(&self.plaintext[self.consumed..(self.consumed + take)])
+                            .expect("write to slice is infallible");
+                        nwritten += n;
+                        self.consumed += n;
+                        State::Next(FlushOutput(stream, finalized))
+                    }
+                }
+                Finalized => State::Return((nread, nwritten), Finalized),
             };
 
             self.state = next_state;
         }
+    }
+
+    /// Convenience version of `update` that allocates and returns output data
+    /// as a `Vec<u8>`.
+    pub fn update_to_vec(&mut self, input: impl AsRef<[u8]>) -> Result<Vec<u8>, SaltlickError> {
+        let input = input.as_ref();
+        let mut plaintext = vec![0u8; self.estimate_output_size(input.len())];
+        let (rd, wr) = self.update(input, &mut plaintext)?;
+
+        // The decrypter never buffers more than 1 complete block, and input
+        // data will never decrypt larger than the ciphertext size. Since we
+        // allocate space for 2 complete blocks plus the input size, we will
+        // always consume the entire input. If we don't, an assumption has
+        // broken down and the output is not valid.
+        assert!(rd == input.len());
+
+        plaintext.truncate(wr);
+        Ok(plaintext)
     }
 
     /// Returns true if the crypter has been finalized.
@@ -484,19 +661,40 @@ impl Decrypter {
     pub fn is_not_finalized(&self) -> bool {
         !self.is_finalized()
     }
+
+    fn estimate_output_size(&self, input_len: usize) -> usize {
+        input_len + (2 * self.last_block_size.unwrap_or(DEFAULT_BLOCK_SIZE))
+    }
+
+    fn plaintext_len(&self) -> usize {
+        self.plaintext.len() - self.consumed
+    }
+}
+
+// Helper functions that mutate a reference to a slice, allowing us to
+// effectively ignore input data that we've already read and output data that
+// we've already written. This is safe because a slice is always a reference to
+// some other data - all we're doing is updating the pointer so it points to a
+// new subset of that same data.
+fn advance_slice<T>(slice: &mut &[T], n: usize) {
+    let (_a, b) = mem::replace(slice, &[]).split_at(n);
+    *slice = b;
+}
+
+fn advance_slice_mut<T>(slice: &mut &mut [T], n: usize) {
+    let (_a, b) = mem::replace(slice, &mut []).split_at_mut(n);
+    *slice = b;
 }
 
 mod read {
-    use std::mem;
-
+    use super::{PublicKey, SaltlickError, SecretKey, Version, MAGIC, MAGIC_LEN, MESSAGE_LEN_LEN};
     use byteorder::{ByteOrder, NetworkEndian};
     use sodiumoxide::crypto::{
         box_::PUBLICKEYBYTES,
         sealedbox::{self, SEALBYTES},
         secretstream::{Header, Key, Pull, Stream, Tag, ABYTES, HEADERBYTES, KEYBYTES},
     };
-
-    use super::{PublicKey, SaltlickError, SecretKey, Version, MAGIC, MAGIC_LEN, MESSAGE_LEN_LEN};
+    use std::mem;
 
     const PREHEADER_LEN: usize = MAGIC_LEN + mem::size_of::<u8>();
     const SEALEDTEXT_LEN: usize = KEYBYTES + HEADERBYTES + SEALBYTES;
@@ -506,40 +704,35 @@ mod read {
         Complete(T, usize),
     }
 
-    pub fn preheader(input: impl AsRef<[u8]>) -> Result<ReadStatus<Version>, SaltlickError> {
-        let input_len = input.as_ref().len();
-        if input_len < PREHEADER_LEN {
-            return Ok(ReadStatus::Incomplete(PREHEADER_LEN - input_len));
+    pub fn preheader(input: &[u8]) -> Result<ReadStatus<Version>, SaltlickError> {
+        if input.len() < PREHEADER_LEN {
+            return Ok(ReadStatus::Incomplete(PREHEADER_LEN - input.len()));
         }
-        if &input.as_ref()[..MAGIC.len()] != MAGIC {
+        if &input[..MAGIC.len()] != MAGIC {
             return Err(SaltlickError::BadMagic);
         }
-        let version = Version::from_u8(input.as_ref()[MAGIC.len()]);
+        let version = Version::from_u8(input[MAGIC.len()]);
 
         Ok(ReadStatus::Complete(version, PREHEADER_LEN))
     }
 
-    pub fn header_v1_public_key(
-        input: impl AsRef<[u8]>,
-    ) -> Result<ReadStatus<PublicKey>, SaltlickError> {
-        let input_len = input.as_ref().len();
-        if input_len < PUBLICKEYBYTES {
-            return Ok(ReadStatus::Incomplete(PUBLICKEYBYTES - input_len));
+    pub fn header_v1_public_key(input: &[u8]) -> Result<ReadStatus<PublicKey>, SaltlickError> {
+        if input.len() < PUBLICKEYBYTES {
+            return Ok(ReadStatus::Incomplete(PUBLICKEYBYTES - input.len()));
         }
-        let public_key = PublicKey::from_raw_curve25519(&input.as_ref()[..PUBLICKEYBYTES])?;
+        let public_key = PublicKey::from_raw_curve25519(&input[..PUBLICKEYBYTES])?;
         Ok(ReadStatus::Complete(public_key, PUBLICKEYBYTES))
     }
 
     pub fn header_v1_sealed_text(
-        input: impl AsRef<[u8]>,
+        input: &[u8],
         public_key: &PublicKey,
         secret_key: &SecretKey,
     ) -> Result<ReadStatus<(Key, Header)>, SaltlickError> {
-        let input_len = input.as_ref().len();
-        if input_len < SEALEDTEXT_LEN {
-            return Ok(ReadStatus::Incomplete(SEALEDTEXT_LEN - input_len));
+        if input.len() < SEALEDTEXT_LEN {
+            return Ok(ReadStatus::Incomplete(SEALEDTEXT_LEN - input.len()));
         }
-        let sealed_text = &input.as_ref()[..SEALEDTEXT_LEN];
+        let sealed_text = &input[..SEALEDTEXT_LEN];
         let plaintext = sealedbox::open(sealed_text, &public_key.inner, &secret_key.inner)
             .map_err(|()| SaltlickError::DecryptionFailure)?;
         let symmetric_key =
@@ -553,15 +746,14 @@ mod read {
     }
 
     pub fn length(
-        input: impl AsRef<[u8]>,
+        input: &[u8],
         stream: &mut Stream<Pull>,
     ) -> Result<ReadStatus<usize>, SaltlickError> {
-        let input_len = input.as_ref().len();
-        if input_len < MESSAGE_LEN_LEN {
-            return Ok(ReadStatus::Incomplete(MESSAGE_LEN_LEN - input_len));
+        if input.len() < MESSAGE_LEN_LEN {
+            return Ok(ReadStatus::Incomplete(MESSAGE_LEN_LEN - input.len()));
         }
         let (plaintext, tag) = stream
-            .pull(&input.as_ref()[..MESSAGE_LEN_LEN], None)
+            .pull(&input[..MESSAGE_LEN_LEN], None)
             .map_err(|()| SaltlickError::DecryptionFailure)?;
         if tag != Tag::Message {
             // A length block should never be the end of the stream
@@ -574,17 +766,17 @@ mod read {
     }
 
     pub fn block(
-        input: impl AsRef<[u8]>,
+        input: &[u8],
+        output: &mut Vec<u8>,
         stream: &mut Stream<Pull>,
         message_length: usize,
-    ) -> Result<ReadStatus<(Vec<u8>, bool)>, SaltlickError> {
-        let input_len = input.as_ref().len();
+    ) -> Result<ReadStatus<bool>, SaltlickError> {
         let block_len = message_length + ABYTES;
-        if input_len < block_len {
-            return Ok(ReadStatus::Incomplete(block_len - input_len));
+        if input.len() < block_len {
+            return Ok(ReadStatus::Incomplete(block_len - input.len()));
         }
-        let (plaintext, tag) = stream
-            .pull(&input.as_ref()[..block_len], None)
+        let tag = stream
+            .pull_to_vec(&input[..block_len], None, output)
             .map_err(|()| SaltlickError::DecryptionFailure)?;
         match tag {
             Tag::Message if message_length == 0 => {
@@ -592,20 +784,19 @@ mod read {
                 // message.
                 Err(SaltlickError::DecryptionFailure)
             }
-            Tag::Message => Ok(ReadStatus::Complete((plaintext, false), block_len)),
-            Tag::Final => Ok(ReadStatus::Complete((plaintext, true), block_len)),
+            Tag::Message => Ok(ReadStatus::Complete(false, block_len)),
+            Tag::Final => Ok(ReadStatus::Complete(true, block_len)),
             Tag::Push | Tag::Rekey => Err(SaltlickError::DecryptionFailure),
         }
     }
 }
 
 mod write {
+    use super::{PublicKey, Version, MAGIC};
     use sodiumoxide::crypto::{
         sealedbox,
         secretstream::{Header, Key},
     };
-
-    use super::{PublicKey, Version, MAGIC};
 
     pub fn preheader(version: Version) -> Vec<u8> {
         let mut header = Vec::from(MAGIC);
@@ -619,11 +810,11 @@ mod write {
         public_key: &PublicKey,
     ) -> Vec<u8> {
         let mut to_encrypt = Vec::new();
-        to_encrypt.extend(&symmetric_key[..]);
-        to_encrypt.extend(&stream_header[..]);
+        to_encrypt.extend_from_slice(&symmetric_key[..]);
+        to_encrypt.extend_from_slice(&stream_header[..]);
 
         let mut header = preheader(Version::V1);
-        header.extend(&public_key.inner[..]);
+        header.extend_from_slice(&public_key.inner[..]);
         header.extend(sealedbox::seal(&to_encrypt, &public_key.inner));
         header
     }
@@ -631,14 +822,10 @@ mod write {
 
 #[cfg(test)]
 mod tests {
+    use super::{Decrypter, Encrypter};
+    use crate::{error::SaltlickError, key};
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
-
-    use crate::error::SaltlickError;
-    use crate::key;
-    use crate::multibuf::MultiBuf;
-
-    use super::{Decrypter, Encrypter};
 
     fn random_bytes(seed: u64, size: usize) -> Vec<u8> {
         let mut rng = XorShiftRng::seed_from_u64(seed);
@@ -657,20 +844,20 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public.clone());
-        let mut ciphertext = MultiBuf::new();
-        encrypter.set_block_size(1500);
+        let mut ciphertext = Vec::new();
+        encrypter.set_block_size(1024);
         for block in test_data.iter() {
-            ciphertext.extend(encrypter.push(block, false).unwrap())
+            ciphertext.extend(encrypter.update_to_vec(block, false).unwrap())
         }
-        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
+        ciphertext.extend(encrypter.update_to_vec(&[] as &[u8], true).unwrap());
 
         let mut decrypter = Decrypter::new(public, secret);
-        let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
+        let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
+        assert!(decrypter.is_finalized());
         assert_eq!(
             test_data.into_iter().flatten().collect::<Vec<u8>>(),
-            plaintext.into_vec()
+            plaintext,
         );
-        assert!(decrypter.is_finalized());
     }
 
     #[test]
@@ -679,20 +866,23 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public.clone());
-        let mut ciphertext = MultiBuf::new();
-        encrypter.set_block_size(500);
-        for byte in test_data.iter() {
-            ciphertext.extend(encrypter.push(&[*byte], false).unwrap())
+        let mut ciphertext = Vec::new();
+        encrypter.set_block_size(1024);
+        for byte in test_data.iter().copied() {
+            ciphertext.extend(encrypter.update_to_vec(&[byte], false).unwrap());
         }
-        ciphertext.extend(encrypter.push(&[] as &[u8], true).unwrap());
+        ciphertext.extend(encrypter.update_to_vec(&[] as &[u8], true).unwrap());
 
         let mut decrypter = Decrypter::new(public, secret);
         let mut plaintext = Vec::new();
-        for byte in ciphertext.into_vec() {
-            plaintext.extend(decrypter.pull(&[byte]).unwrap().into_vec());
+        let mut buffer = vec![0u8; 512];
+        for byte in ciphertext {
+            let (rd, wr) = decrypter.update(&[byte], &mut buffer[..]).unwrap();
+            plaintext.extend(&buffer[..wr]);
+            assert_eq!(1, rd);
         }
-        assert_eq!(test_data, plaintext);
         assert!(decrypter.is_finalized());
+        assert_eq!(test_data, plaintext);
     }
 
     #[test]
@@ -701,14 +891,12 @@ mod tests {
         let (public, secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public);
-        let mut ciphertext = MultiBuf::new();
-        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap());
+        let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
 
         let mut decrypter = Decrypter::new_deferred(move |_public| Some(secret));
-        let plaintext = decrypter.pull(ciphertext.into_vec()).unwrap();
-
-        assert_eq!(test_data, plaintext.into_vec());
+        let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
         assert!(decrypter.is_finalized());
+        assert_eq!(test_data, plaintext);
     }
 
     #[test]
@@ -717,13 +905,78 @@ mod tests {
         let (public, _secret) = key::gen_keypair();
 
         let mut encrypter = Encrypter::new(public);
-        let mut ciphertext = MultiBuf::new();
-        ciphertext.extend(encrypter.push(&test_data[..], true).unwrap());
+        let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
 
         let mut decrypter = Decrypter::new_deferred(move |_public| None);
         assert_eq!(
             SaltlickError::SecretKeyNotFound,
-            decrypter.pull(&ciphertext.into_vec()[..]).unwrap_err()
+            decrypter.update_to_vec(&ciphertext[..]).unwrap_err()
         );
+    }
+
+    #[test]
+    fn wrong_public_key_test() {
+        let test_data = random_bytes(6, 1024);
+        let (public, _secret) = key::gen_keypair();
+        let (other_public, other_secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public);
+        let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
+
+        let mut decrypter = Decrypter::new(other_public, other_secret);
+        match decrypter.update_to_vec(&ciphertext[..]) {
+            Err(SaltlickError::PublicKeyMismatch) => {}
+            other => panic!(
+                "Expected Err(SaltlickError::PublicKeyMismatch, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn bad_magic() {
+        let test_data = random_bytes(7, 1024);
+        let (public, secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public.clone());
+        let mut ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
+
+        // Corrupt the magic
+        ciphertext[0..8].copy_from_slice(&b"PEPRLICK"[..]);
+        let mut decrypter = Decrypter::new(public, secret);
+        match decrypter.update_to_vec(&ciphertext[..]) {
+            Err(SaltlickError::BadMagic) => {}
+            other => panic!("Expected Err(SaltlickError::BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn update_to_vec_encrypter_resize_test() {
+        let test_data = random_bytes(8, 512 * 1024);
+        let (public, secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public.clone());
+
+        // set a large block size so the encrypter buffers input data
+        encrypter.set_block_size(8 * 1024 * 1024);
+
+        // write input data, it should all be buffered
+        let ciphertext1 = encrypter.update_to_vec(&test_data[..], false).unwrap();
+
+        // now make the block size really small, causing the buffer size
+        // estimate to be wrong
+        encrypter.set_block_size(1024);
+        let ciphertext2 = encrypter.update_to_vec(&test_data[..], true).unwrap();
+
+        // make sure that everything still decrypts properly
+        let mut expected = Vec::from(&test_data[..]);
+        expected.extend(&test_data[..]);
+        let mut ciphertext = ciphertext1;
+        ciphertext.extend(ciphertext2);
+
+        let mut decrypter = Decrypter::new(public, secret);
+        let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
+        assert!(decrypter.is_finalized());
+        assert_eq!(expected, plaintext);
     }
 }
