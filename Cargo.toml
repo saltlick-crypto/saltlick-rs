@@ -13,6 +13,7 @@ license = "Apache-2.0 OR MIT"
 
 [badges]
 travis-ci = { repository = "saltlick-crypto/saltlick-rs", branch = "master" }
+codecov = { repository = "saltlick-crypto/saltlick-rs", branch = "master", service = "github" }
 is-it-maintained-issue-resolution = { repository = "saltlick-crypto/saltlick-rs" }
 is-it-maintained-open-issues = { repository = "saltlick-crypto/saltlick-rs" }
 maintenance = { status = "actively-developed" }
