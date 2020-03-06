@@ -21,6 +21,7 @@ pub enum SaltlickError {
     InvalidKeyFormat,
     PublicKeyMismatch,
     SecretKeyNotFound,
+    StateMachineErrored,
     StreamStartFailure,
     UnsupportedKeyAlgorithm,
     UnsupportedVersion,
@@ -43,6 +44,10 @@ impl fmt::Display for SaltlickError {
             InvalidKeyFormat => write!(f, "Key file is invalid, must be PEM encoded ASN.1"),
             PublicKeyMismatch => write!(f, "Provided public key does not match file public key."),
             SecretKeyNotFound => write!(f, "Unable to find secret key for file."),
+            StateMachineErrored => write!(
+                f,
+                "The state machine was called having previously returned an error."
+            ),
             StreamStartFailure => write!(f, "Stream failed to start."),
             UnsupportedKeyAlgorithm => write!(f, "Key algorithm is unknown or unsupported."),
             UnsupportedVersion => write!(f, "Version is unknown or unsupported."),
