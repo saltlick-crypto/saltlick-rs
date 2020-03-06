@@ -336,27 +336,11 @@ impl StateMachine for Encrypter {
     }
 }
 
-// This is a workaround to allow calling a Box<FnOnce> in Rust versions less
-// than 1.35. When the MSRV is 1.35 or greater, this can be removed and
-// replaced directly with `Box<dyn FnOnce(...)>`.
-//
-// Refer to https://github.com/rust-lang/rust/issues/28796 for more info.
-pub(crate) trait KeyLookupFn {
-    fn call_box(self: Box<Self>, public_key: &PublicKey) -> Option<SecretKey>;
-}
-
-impl<T> KeyLookupFn for T
-where
-    T: FnOnce(&PublicKey) -> Option<SecretKey>,
-{
-    fn call_box(self: Box<Self>, public_key: &PublicKey) -> Option<SecretKey> {
-        (*self)(public_key)
-    }
-}
+type KeyLookupFn = Box<dyn FnOnce(&PublicKey) -> Option<SecretKey>>;
 
 pub(crate) enum KeyResolution {
     Available(PublicKey, SecretKey),
-    Deferred(Box<dyn KeyLookupFn>),
+    Deferred(KeyLookupFn),
 }
 
 impl fmt::Debug for KeyResolution {
@@ -372,7 +356,7 @@ impl fmt::Debug for KeyResolution {
 pub(crate) enum DecrypterState {
     ReadPreheader(KeyResolution),
     ReadPublicKey(KeyResolution),
-    SecretKeyLookup(PublicKey, Box<dyn KeyLookupFn>),
+    SecretKeyLookup(PublicKey, KeyLookupFn),
     ReadHeader(PublicKey, PublicKey, SecretKey),
     OpenStream(Key, Header),
     ReadLength(Stream<Pull>),
@@ -504,7 +488,7 @@ impl Decrypter {
                 }
             },
             SecretKeyLookup(file_public_key, lookup_fn) => {
-                if let Some(secret_key) = lookup_fn.call_box(&file_public_key) {
+                if let Some(secret_key) = lookup_fn(&file_public_key) {
                     state::next(ReadHeader(
                         file_public_key.clone(),
                         file_public_key,
