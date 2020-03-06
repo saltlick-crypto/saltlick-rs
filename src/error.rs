@@ -8,55 +8,40 @@
 
 use pem::PemError;
 use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
-use std::{error::Error, fmt, io};
+use std::io;
+use thiserror::Error;
 
 /// Saltlick errors
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Error, Hash, Eq, PartialEq)]
 pub enum SaltlickError {
+    #[error("Magic value incorrect - is this a saltlick file?")]
     BadMagic,
+    #[error("Failed to decrypt - stream is corrupt.")]
     DecryptionFailure,
+    #[error("Stream is finalized, no more data may be written.")]
     Finalized,
+    #[error("Stream ended before Final tag receive, file is incomplete!")]
     Incomplete,
+    #[error("Key is the incorrect length.")]
     IncorrectKeyLength,
+    #[error("Key file is invalid, must be PEM encoded ASN.1")]
     InvalidKeyFormat,
+    #[error("Provided public key does not match file public key.")]
     PublicKeyMismatch,
+    #[error("Unable to find secret key for file.")]
     SecretKeyNotFound,
+    #[error("The state machine was called having previously returned an error.")]
     StateMachineErrored,
+    #[error("Stream failed to start.")]
     StreamStartFailure,
+    #[error("Key algorithm is unknown or unsupported.")]
     UnsupportedKeyAlgorithm,
+    #[error("Version is unknown or unsupported.")]
     UnsupportedVersion,
 }
 
-impl Error for SaltlickError {}
-
-impl fmt::Display for SaltlickError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::SaltlickError::*;
-        match self {
-            BadMagic => write!(f, "Magic value incorrect - is this a saltlick file?"),
-            DecryptionFailure => write!(f, "Failed to decrypt - stream is corrupt."),
-            Finalized => write!(f, "Stream is finalized, no more data may be written."),
-            Incomplete => write!(
-                f,
-                "Stream ended before Final tag receive, file is incomplete!"
-            ),
-            IncorrectKeyLength => write!(f, "Key is the incorrect length."),
-            InvalidKeyFormat => write!(f, "Key file is invalid, must be PEM encoded ASN.1"),
-            PublicKeyMismatch => write!(f, "Provided public key does not match file public key."),
-            SecretKeyNotFound => write!(f, "Unable to find secret key for file."),
-            StateMachineErrored => write!(
-                f,
-                "The state machine was called having previously returned an error."
-            ),
-            StreamStartFailure => write!(f, "Stream failed to start."),
-            UnsupportedKeyAlgorithm => write!(f, "Key algorithm is unknown or unsupported."),
-            UnsupportedVersion => write!(f, "Version is unknown or unsupported."),
-        }
-    }
-}
-
 impl From<PemError> for SaltlickError {
-    fn from(_e: PemError) -> SaltlickError {
+    fn from(_: PemError) -> SaltlickError {
         SaltlickError::InvalidKeyFormat
     }
 }
@@ -84,31 +69,33 @@ impl From<SaltlickError> for io::Error {
 /// Errors possible when keys are loaded directly from files. Note that this is
 /// not part of the normal `SaltlickError` because `std::io::Error` does not
 /// implement `Clone`, `Hash`, or `Eq`.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SaltlickKeyIoError {
-    IoError(io::Error),
-    SaltlickError(SaltlickError),
+    #[error("key file I/O error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("key file parse error: {0}")]
+    SaltlickError(#[from] SaltlickError),
 }
 
-impl Error for SaltlickKeyIoError {}
+#[cfg(test)]
+mod tests {
+    use super::SaltlickError;
+    use pem::PemError;
+    use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
 
-impl fmt::Display for SaltlickKeyIoError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            SaltlickKeyIoError::IoError(e) => write!(f, "key file I/O error: {}", e),
-            SaltlickKeyIoError::SaltlickError(e) => write!(f, "key file parse error: {}", e),
-        }
-    }
-}
-
-impl From<io::Error> for SaltlickKeyIoError {
-    fn from(e: io::Error) -> SaltlickKeyIoError {
-        SaltlickKeyIoError::IoError(e)
-    }
-}
-
-impl From<SaltlickError> for SaltlickKeyIoError {
-    fn from(e: SaltlickError) -> SaltlickKeyIoError {
-        SaltlickKeyIoError::SaltlickError(e)
+    #[test]
+    fn from_conversions_test() {
+        assert_eq!(
+            SaltlickError::InvalidKeyFormat,
+            SaltlickError::from(PemError::MissingData),
+        );
+        assert_eq!(
+            SaltlickError::InvalidKeyFormat,
+            SaltlickError::from(ASN1EncodeErr::ObjectIdentHasTooFewFields),
+        );
+        assert_eq!(
+            SaltlickError::InvalidKeyFormat,
+            SaltlickError::from(ASN1DecodeErr::EmptyBuffer),
+        );
     }
 }

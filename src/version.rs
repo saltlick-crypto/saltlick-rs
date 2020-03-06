@@ -45,3 +45,26 @@ impl Version {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Version;
+
+    #[test]
+    fn to_u8_test() {
+        let v1 = Version::V1;
+        assert_eq!(1u8, v1.to_u8());
+        assert!(!v1.is_unknown());
+        let unknown = Version::Unknown(0u8);
+        assert_eq!(0u8, unknown.to_u8());
+        assert!(unknown.is_unknown());
+    }
+
+    #[test]
+    fn from_u8_test() {
+        let v1 = 1u8;
+        assert_eq!(Version::V1, Version::from_u8(v1));
+        let unknown = 0u8;
+        assert_eq!(Version::Unknown(0u8), Version::from_u8(unknown));
+    }
+}
