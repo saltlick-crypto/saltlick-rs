@@ -30,7 +30,14 @@ jobs:
 
     - stage: test
       rust: 1.39.0  # Oldest supported
-    - rust: stable
+    - name: "Rust: stable + proptests"
+      rust: stable
+      script:
+        # Proptests take a lot longer to run in debug mode, enough so that the
+        # extra time to build in release mode is worth it.
+        - cargo test --release --features=proptest-tests
+    - name: "Rust: stable + tarpaulin"
+      rust: stable
       addons:
         apt:
           packages:
