@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `MultiBuf` has been completely removed in favor of slices for input and
   output to `Encrypter`/`Decrypter` `update` functions.
+- `is_not_finalized` functions have been removed from `Encrypter`/`Decrypter` -
+  use `!is_finalized()` instead.
 
 ## [0.2.0] - 2020-01-16
 ### Added

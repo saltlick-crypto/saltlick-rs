@@ -26,10 +26,10 @@ impl CommonOps for Decrypter {
     }
 
     fn finalize(&mut self, _output: &mut [u8]) -> io::Result<usize> {
-        if self.is_not_finalized() {
-            Err(SaltlickError::Incomplete.into())
-        } else {
+        if self.is_finalized() {
             Ok(0)
+        } else {
+            Err(SaltlickError::Incomplete.into())
         }
     }
 
