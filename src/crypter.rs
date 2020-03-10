@@ -771,18 +771,21 @@ mod write {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Decrypter, Encrypter, KeyResolution};
-    use crate::{error::SaltlickError, key};
+mod testutils {
     use rand::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
-
-    fn random_bytes(seed: u64, size: usize) -> Vec<u8> {
+    pub fn random_bytes(seed: u64, size: usize) -> Vec<u8> {
         let mut rng = XorShiftRng::seed_from_u64(seed);
         let mut bytes = vec![0u8; size];
         rng.fill_bytes(&mut bytes);
         bytes
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{testutils::random_bytes, Decrypter, Encrypter, KeyResolution};
+    use crate::{error::SaltlickError, key};
 
     #[test]
     fn simple_test() {
@@ -976,5 +979,191 @@ mod tests {
         let _ = format!("{:?}", decrypter);
         let _ = format!("{:?}", encrypter);
         let _ = format!("{:?}", key_resolution);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "proptest-tests")]
+mod proptest_tests {
+    use super::{testutils::random_bytes, Decrypter, Encrypter};
+    use crate::key::{self, PublicKey, SecretKey};
+    use proptest::prelude::*;
+    use rand::{RngCore, SeedableRng};
+    use rand_xorshift::XorShiftRng;
+    use std::{cmp, usize};
+
+    const MAX_DATA: usize = 1024 * 1024;
+
+    // Random bytes with "chunks" specifications for each step of the process.
+    // The chunks are lists of `usize` variables with each element describing
+    // the number of bytes to take. The chunk lists are put into a cycle so
+    // they are effectively infinite, but return a different sized slice on
+    // each iteration. This is to simulate a real-world situation where data
+    // may be coming in at varying rates. The chunks described are:
+    //
+    //   * `encrypter_input_chunks` - input to encrypter from the plaintext data
+    //   * `encrypter_output_chunks` - output buffer size from encrypter to encrypted data
+    //   * `decrypter_input_chunks` - input to decrypter from the encrypted data
+    //   * `decrypter_output_chunks` - output buffer size from decrypter
+    #[derive(Debug)]
+    struct TestData {
+        data: Box<[u8]>,
+        encrypter_input_chunks: Vec<usize>,
+        encrypter_output_chunks: Vec<usize>,
+        decrypter_input_chunks: Vec<usize>,
+        decrypter_output_chunks: Vec<usize>,
+    }
+
+    fn round_trip(
+        public_key: PublicKey,
+        secret_key: SecretKey,
+        td: TestData,
+    ) -> (TestData, Vec<u8>) {
+        let mut encrypter = Encrypter::new(public_key.clone());
+        let mut decrypter = Decrypter::new(public_key, secret_key);
+        let mut encrypted = Vec::with_capacity(td.data.len() * 2);
+        let mut decrypted = Vec::with_capacity(td.data.len());
+        let mut encrypter_nread = 0;
+        let mut encrypter_nwritten = 0;
+        let mut decrypter_nread = 0;
+
+        let max_buffer = td
+            .encrypter_output_chunks
+            .iter()
+            .chain(td.decrypter_output_chunks.iter())
+            .max()
+            .unwrap();
+        let mut buffer = vec![0u8; *max_buffer];
+
+        let chunk_iter = td
+            .encrypter_input_chunks
+            .iter()
+            .copied()
+            .cycle()
+            .zip(td.encrypter_output_chunks.iter().copied().cycle())
+            .zip(td.decrypter_input_chunks.iter().copied().cycle())
+            .zip(td.decrypter_output_chunks.iter().copied().cycle())
+            .map(|(((a, b), c), d)| (a, b, c, d));
+
+        for (encrypt_in, encrypt_out, decrypt_in, decrypt_out) in chunk_iter {
+            if encrypter.is_finalized() && decrypter.is_finalized() {
+                break;
+            }
+
+            if !encrypter.is_finalized() {
+                let take = cmp::min(td.data[encrypter_nread..].len(), encrypt_in);
+                let finish = encrypter_nread >= td.data.len();
+                let (rd, wr) = encrypter
+                    .update(
+                        &td.data[encrypter_nread..(encrypter_nread + take)],
+                        &mut buffer[..encrypt_out],
+                        finish,
+                    )
+                    .unwrap();
+                encrypter_nread += rd;
+                encrypter_nwritten += wr;
+                encrypted.extend(&buffer[..wr]);
+            }
+
+            let take = cmp::min(
+                encrypted[decrypter_nread..encrypter_nwritten].len(),
+                decrypt_in,
+            );
+            let (rd, wr) = decrypter
+                .update(
+                    &encrypted[decrypter_nread..(decrypter_nread + take)],
+                    &mut buffer[..decrypt_out],
+                )
+                .unwrap();
+            decrypter_nread += rd;
+            decrypted.extend(&buffer[..wr]);
+        }
+
+        (td, decrypted)
+    }
+
+    // Creates arbitrary chunk descriptions with values between min_value and
+    // max_value, inclusive.
+    fn arb_chunks(
+        min_value: usize,
+        max_value: usize,
+        max_count: usize,
+    ) -> impl Strategy<Value = Vec<usize>> {
+        proptest::collection::vec(min_value..=max_value, 1..=max_count)
+    }
+
+    // Create arbitrary test data - both in terms of random input bytes as well
+    // as random chunk sizes to read/write.
+    prop_compose! {
+        fn arb_test_data(max_count: usize)
+            (data_len in 1..MAX_DATA)
+            (
+                data_len in Just(data_len),
+                seed in any::<u64>().no_shrink(),
+                encrypter_input_chunks in arb_chunks(1, data_len * 2, max_count),
+                encrypter_output_chunks in arb_chunks(1, data_len * 2, max_count),
+                decrypter_input_chunks in arb_chunks(1, data_len * 2, max_count),
+                decrypter_output_chunks in arb_chunks(1, data_len * 2, max_count),
+            )
+            -> TestData
+        {
+            let data = random_bytes(seed, data_len).into_boxed_slice();
+            TestData {
+                data,
+                encrypter_input_chunks,
+                encrypter_output_chunks,
+                decrypter_input_chunks,
+                decrypter_output_chunks,
+            }
+        }
+    }
+
+    #[test]
+    fn round_trip_proptest() {
+        let (public, secret) = key::gen_keypair();
+        proptest!(move |(test_data in arb_test_data(50))| {
+            let (test_data, result) = round_trip(
+                public.clone(),
+                secret.clone(),
+                test_data,
+            );
+            prop_assert_eq!(&test_data.data[..], &result[..]);
+        });
+    }
+
+    proptest! {
+        #[test]
+        fn encrypter_fuzz_test(
+            seed in any::<u64>().no_shrink(),
+            chunks in proptest::collection::vec(1usize..=1024, 1..=1024),
+        ) {
+            let (public, _) = key::gen_keypair();
+            let mut rng = XorShiftRng::seed_from_u64(seed);
+            let mut data = vec![0u8; 1024];
+            let mut encrypter = Encrypter::new(public);
+            for chunk in chunks {
+                rng.fill_bytes(&mut data);
+                let _ = encrypter.update_to_vec(&data[..chunk], false).unwrap();
+            }
+        }
+
+        #[test]
+        fn decrypter_fuzz_test(
+            seed in any::<u64>().no_shrink(),
+            chunks in proptest::collection::vec(1usize..=1024, 1..=1024),
+        ) {
+            let (public, secret) = key::gen_keypair();
+            let mut rng = XorShiftRng::seed_from_u64(seed);
+            let mut data = vec![0u8; 1024];
+            let mut decrypter = Decrypter::new(public, secret);
+            for chunk in chunks {
+                rng.fill_bytes(&mut data);
+                // Just making sure that we don't panic/crash, not actually
+                // checking the output is valid. We can't just blanket
+                // `unwrap_err` though because the decrypter may buffer some
+                // bytes and return success early on.
+                let _ = decrypter.update_to_vec(&data[..chunk]);
+            }
+        }
     }
 }
