@@ -290,8 +290,7 @@ pub fn gen_keypair() -> (PublicKey, SecretKey) {
 #[cfg(test)]
 mod tests {
     use super::{PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES};
-    use rand::{RngCore, SeedableRng};
-    use rand_xorshift::XorShiftRng;
+    use crate::testutils::random_bytes;
     use std::{fs::File, io::Write};
     use tempdir::TempDir;
 
@@ -302,13 +301,6 @@ mod tests {
     const PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
     MCowBQYDK2VuAyEA/ZMwRuIZi7mirc8Wx6pet++gYg1wh+7iVT5y2bR0TmU=
     -----END PUBLIC KEY-----";
-
-    fn random_bytes(seed: u64, size: usize) -> Box<[u8]> {
-        let mut rng = XorShiftRng::seed_from_u64(seed);
-        let mut bytes = vec![0u8; size];
-        rng.fill_bytes(&mut bytes);
-        bytes.into_boxed_slice()
-    }
 
     #[test]
     fn public_key_from_raw_test() {

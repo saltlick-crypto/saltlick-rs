@@ -208,18 +208,9 @@ impl<W: AsyncWrite> AsyncWrite for AsyncSaltlickEncrypter<W> {
 #[cfg(test)]
 mod tests {
     use super::{AsyncSaltlickDecrypter, AsyncSaltlickEncrypter};
-    use crate::key::gen_keypair;
-    use rand::{RngCore, SeedableRng};
-    use rand_xorshift::XorShiftRng;
+    use crate::{key::gen_keypair, testutils::random_bytes};
     use std::{cmp, iter};
     use tokio::io::AsyncWriteExt;
-
-    fn random_bytes(seed: u64, size: usize) -> Box<[u8]> {
-        let mut rng = XorShiftRng::seed_from_u64(seed);
-        let mut bytes = vec![0u8; size];
-        rng.fill_bytes(&mut bytes);
-        bytes.into_boxed_slice()
-    }
 
     #[tokio::test]
     async fn single_write_test() {

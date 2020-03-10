@@ -185,20 +185,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::{SaltlickDecrypterStream, SaltlickEncrypterStream};
-    use crate::key::gen_keypair;
+    use crate::{key::gen_keypair, testutils::random_bytes};
     use bytes::{Bytes, BytesMut};
     use futures::Stream;
-    use rand::{Rng, RngCore, SeedableRng};
+    use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use std::{cmp, io};
     use tokio::stream::{self, StreamExt};
-
-    fn random_bytes(seed: u64, size: usize) -> Box<[u8]> {
-        let mut rng = XorShiftRng::seed_from_u64(seed);
-        let mut bytes = vec![0u8; size];
-        rng.fill_bytes(&mut bytes);
-        bytes.into_boxed_slice()
-    }
 
     #[tokio::test]
     async fn round_trip_test() {

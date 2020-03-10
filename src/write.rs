@@ -218,17 +218,8 @@ impl<W: Write> Drop for SaltlickEncrypter<W> {
 #[cfg(test)]
 mod tests {
     use super::{SaltlickDecrypter, SaltlickEncrypter};
-    use crate::key::gen_keypair;
-    use rand::{RngCore, SeedableRng};
-    use rand_xorshift::XorShiftRng;
+    use crate::{key::gen_keypair, testutils::random_bytes};
     use std::{cmp, io::Write, iter};
-
-    fn random_bytes(seed: u64, size: usize) -> Box<[u8]> {
-        let mut rng = XorShiftRng::seed_from_u64(seed);
-        let mut bytes = vec![0u8; size];
-        rng.fill_bytes(&mut bytes);
-        bytes.into_boxed_slice()
-    }
 
     #[test]
     fn single_write_test() {
