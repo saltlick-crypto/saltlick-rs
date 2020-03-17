@@ -16,11 +16,12 @@
 //! Both low-level and high-level APIs are provided. The low-level API requires
 //! manually updating an encrypter with chunks of plaintext and receiving
 //! ciphertext, or updating a decrypter with chunks of ciphertext and receiving
-//! plaintext. The current high-level API implements Rust's [`Read`] and
-//! [`Write`] traits to provide a simple to use way to read and write files.
+//! plaintext. High-level APIs are provided for Rust's [`Read`], [`BufRead`],
+//! and [`Write`] traits.
 //!
 //! [saltlick spec]: https://github.com/saltlick-crypto/saltlick-spec
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
+//! [`BufRead`]: https://doc.rust-lang.org/std/io/trait.BufRead.html
 //! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 //!
 //! # Usage
@@ -35,7 +36,11 @@
 //! Next:
 //!
 //! ```
-//! use saltlick::{DecryptingReader, EncryptingWriter, SaltlickError};
+//! use saltlick::{
+//!     read::SaltlickDecrypter,
+//!     write::SaltlickEncrypter,
+//!     SaltlickError,
+//! };
 //! use std::{
 //!     error::Error,
 //!     fs::File,
@@ -48,13 +53,13 @@
 //!
 //!     // Writing data to a stream
 //!     let writer = Vec::new();
-//!     let mut stream = EncryptingWriter::new(public.clone(), writer);
+//!     let mut stream = SaltlickEncrypter::new(public.clone(), writer);
 //!     stream.write_all(b"I have a secret for you")?;
 //!     let ciphertext = stream.finalize()?;
 //!
 //!     // Reading data back from stream
 //!     let reader = Cursor::new(ciphertext);
-//!     let mut stream = DecryptingReader::new(public.clone(), secret.clone(), reader);
+//!     let mut stream = SaltlickDecrypter::new(public.clone(), secret.clone(), reader);
 //!     let mut output = String::new();
 //!     stream.read_to_string(&mut output)?;
 //!     assert_eq!("I have a secret for you", output);
@@ -77,17 +82,19 @@
 //! openssl pkey -in secret.pem -pubout > public.pem
 //! ```
 
+pub mod bufread;
 pub mod crypter;
+pub mod read;
+pub mod write;
 
+mod commonio;
 mod error;
 mod key;
 mod state;
-mod sync;
 mod version;
 
 pub use self::{
     error::{SaltlickError, SaltlickKeyIoError},
     key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES},
-    sync::{DecryptingReader, EncryptingWriter},
     version::Version,
 };

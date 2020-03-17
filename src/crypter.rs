@@ -265,11 +265,6 @@ impl Encrypter {
         }
     }
 
-    /// Returns true if the crypter has not been finalized.
-    pub fn is_not_finalized(&self) -> bool {
-        !self.is_finalized()
-    }
-
     fn start(&mut self) -> Result<Stream<Push>, SaltlickError> {
         let key = secretstream::gen_key();
         let (stream, header) =
@@ -587,11 +582,6 @@ impl Decrypter {
             Some(DecrypterState::Finalized) => true,
             _ => false,
         }
-    }
-
-    /// Returns true if the crypter has not been finalized.
-    pub fn is_not_finalized(&self) -> bool {
-        !self.is_finalized()
     }
 
     fn estimate_output_size(&self, input_len: usize) -> usize {

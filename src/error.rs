@@ -11,7 +11,7 @@ use simple_asn1::{ASN1DecodeErr, ASN1EncodeErr};
 use std::io;
 use thiserror::Error;
 
-/// Saltlick errors
+/// Saltlick errors.
 #[derive(Clone, Debug, Error, Hash, Eq, PartialEq)]
 pub enum SaltlickError {
     #[error("Magic value incorrect - is this a saltlick file?")]

@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Add `Encrypter` and `Decrypter` methods `update_to_vec`, which automatically
   allocates and fills a `Vec<u8>` for output.
-- Add `with_capacity` to `EncryptingWriter` and
-  `with_capacity`/`deferred_with_capacity` to `DecryptingReader` to allow
-  control of inner buffer sizes.
+- Add `with_capacity` to `SaltlickEncrypter` types and
+  `with_capacity`/`deferred_with_capacity` to `SaltlickDecrypter` types to
+  allow control of inner buffer sizes.
+- Wrappers now exist for all permutations of encrypt/decrypt and `Read`,
+  `Write`, and `BufRead`.
 
 ### Changed
 - `Encrypter` and `Decrypter` now reuses buffers for communicating with
@@ -20,10 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The methods `Encrypter::pull` and `Decrypter::push` are now called
   `Encrypter::update` and `Decrypter::update` and have changed function
   signatures.
+- `EncryptingWriter` and `DecryptingReader` have been moved into the `write`
+  and `read` modules respectively. They have been renamed `SaltlickEncrypter`
+  and `SaltlickDecrypter`.
 
 ### Removed
 - `MultiBuf` has been completely removed in favor of slices for input and
   output to `Encrypter`/`Decrypter` `update` functions.
+- `is_not_finalized` functions have been removed from `Encrypter`/`Decrypter` -
+  use `!is_finalized()` instead.
 
 ## [0.2.0] - 2020-01-16
 ### Added
