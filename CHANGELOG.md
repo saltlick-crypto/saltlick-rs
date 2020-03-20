@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allow control of inner buffer sizes.
 - Wrappers now exist for all permutations of encrypt/decrypt and `Read`,
   `Write`, and `BufRead`.
+- Add async implementations for `AsyncRead`, `AsyncWrite`, `AsyncBufRead` and
+  `Stream` data sources.
 
 ### Changed
 - `Encrypter` and `Decrypter` now reuses buffers for communicating with

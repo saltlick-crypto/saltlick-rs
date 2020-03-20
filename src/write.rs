@@ -20,6 +20,9 @@ use std::{
     io::{self, Write},
 };
 
+#[cfg(feature = "io-async")]
+pub use crate::async_::write::*;
+
 /// Wraps an underlying writer with decryption using the saltlick format.
 ///
 /// Wraps a writer that implements [`Write`] and returns a type that also

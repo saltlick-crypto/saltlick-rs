@@ -20,6 +20,9 @@ use std::{
     io::{self, BufReader, Read},
 };
 
+#[cfg(feature = "io-async")]
+pub use crate::async_::read::*;
+
 /// Wraps an underlying reader with decryption using the saltlick format.
 ///
 /// Wraps a reader that implements [`Read`] and returns a type that also

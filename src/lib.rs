@@ -82,10 +82,18 @@
 //! openssl pkey -in secret.pem -pubout > public.pem
 //! ```
 
+// Enables the nightly-only doc_cfg feature when the `docsrs` attribute is
+// preset. We only set this attribute during builds on docs.rs, configured
+// using Cargo.toml package metadata.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod bufread;
 pub mod crypter;
 pub mod read;
 pub mod write;
+
+#[cfg(feature = "io-async")]
+pub(crate) mod async_;
 
 mod commonio;
 mod error;
@@ -98,3 +106,6 @@ pub use self::{
     key::{gen_keypair, PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES},
     version::Version,
 };
+
+#[cfg(feature = "io-async")]
+pub use self::async_::stream;
