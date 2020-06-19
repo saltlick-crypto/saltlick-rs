@@ -7,6 +7,7 @@
 // except according to those terms.
 
 pub(crate) mod bufread;
+pub(crate) mod crypter;
 pub(crate) mod read;
 pub(crate) mod write;
 

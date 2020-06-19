@@ -30,6 +30,8 @@ jobs:
 
     - stage: test
       rust: 1.39.0  # Oldest supported
+      install:
+        - cargo update -p remove_dir_all --precise 0.5.2
     - name: "Rust: stable + proptests"
       rust: stable
       script:
