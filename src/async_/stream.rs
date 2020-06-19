@@ -11,14 +11,16 @@
 //! [`Stream`]: https://docs.rs/futures/0.3/futures/stream/trait.Stream.html
 
 use crate::{
-    crypter::{Decrypter, Encrypter},
-    error::SaltlickError,
+    crypter::{AsyncDecrypter, Encrypter},
     key::{PublicKey, SecretKey},
+    SaltlickError,
 };
+use async_stream::try_stream;
 use bytes::Bytes;
 use futures::{
     ready,
     stream::{Fuse, Stream, StreamExt},
+    Future,
 };
 use pin_project_lite::pin_project;
 use std::{
@@ -28,85 +30,88 @@ use std::{
 };
 
 pin_project! {
-    /// Wraps a stream of bytes and returns a decrypted stream of bytes.
-    ///
-    /// Wraps a stream of bytes and decrypts any received data with the
-    /// provided secret key.  The public key is also checked to make sure this
-    /// encrypted data is for the public/secret key pair provided.
-    ///
-    /// The underlying stream must reach its end (i.e. return `None`) in order
-    /// to complete decryption successfully, as the libsodium crypto relies on
-    /// an end-of-stream tag to provide guarantees of completeness.
-    #[cfg_attr(docsrs, doc(cfg(feature = "io-async")))]
-    #[derive(Debug)]
-    pub struct SaltlickDecrypterStream<S> {
-        decrypter: Decrypter,
-        #[pin]
-        inner: Fuse<S>,
+    pub struct SaltlickDecrypterStream {
+        inner: Pin<Box<dyn Stream<Item = Result<Bytes, io::Error>>>>,
     }
 }
 
-impl<S, E> SaltlickDecrypterStream<S>
-where
-    S: Stream<Item = Result<Bytes, E>> + 'static,
-{
+impl SaltlickDecrypterStream {
     /// Create a new decryption layer over `stream` using `secret_key` and `public_key`.
-    pub fn new(
+    pub fn new<S, E>(
         public_key: PublicKey,
         secret_key: SecretKey,
         stream: S,
-    ) -> SaltlickDecrypterStream<S> {
+    ) -> SaltlickDecrypterStream
+    where
+        E: Into<io::Error> + 'static,
+        S: Stream<Item = Result<Bytes, E>> + 'static,
+    {
+        let decrypter = AsyncDecrypter::new(public_key, secret_key);
+        let inner = Self::build_inner(stream, decrypter);
         SaltlickDecrypterStream {
-            decrypter: Decrypter::new(public_key, secret_key),
-            inner: stream.fuse(),
+            inner: Box::pin(inner),
         }
     }
 
     /// Create a new decryption layer over `stream`, using `lookup_fn` to match
     /// the stream's `public_key` to its `secret_key`.
-    pub fn new_deferred<F>(stream: S, lookup_fn: F) -> SaltlickDecrypterStream<S>
+    pub fn new_deferred<F, S, E>(stream: S, lookup_fn: F) -> SaltlickDecrypterStream
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
+        E: Into<io::Error> + 'static,
+        S: Stream<Item = Result<Bytes, E>> + 'static,
     {
+        let decrypter = AsyncDecrypter::new_deferred(lookup_fn);
+        let inner = Self::build_inner(stream, decrypter);
         SaltlickDecrypterStream {
-            decrypter: Decrypter::new_deferred(lookup_fn),
-            inner: stream.fuse(),
+            inner: Box::pin(inner),
         }
     }
 
-    /// Stop reading/decrypting immediately and return the underlying reader.
-    pub fn into_inner(self) -> S {
-        self.inner.into_inner()
+    /// Create a new decryption layer over 'stream' using an async lookup function
+    /// to perform the key match
+    pub fn new_deferred_async<F, S, E>(
+        stream: S,
+        lookup_fn: impl FnOnce(PublicKey) -> F + 'static,
+    ) -> SaltlickDecrypterStream
+    where
+        F: Future<Output = Option<SecretKey>> + Send + 'static,
+        E: Into<io::Error> + 'static,
+        S: Stream<Item = Result<Bytes, E>> + 'static,
+    {
+        let decrypter = AsyncDecrypter::new_deferred_async(lookup_fn);
+        let inner = Self::build_inner(stream, decrypter);
+        SaltlickDecrypterStream {
+            inner: Box::pin(inner),
+        }
+    }
+
+    fn build_inner<S, E>(
+        stream: S,
+        mut decrypter: AsyncDecrypter,
+    ) -> impl Stream<Item = Result<Bytes, io::Error>>
+    where
+        E: Into<io::Error> + 'static,
+        S: Stream<Item = Result<Bytes, E>> + 'static,
+    {
+        try_stream! {
+            futures::pin_mut!(stream);
+            while let Some(value) = stream.next().await {
+                let value = value?;
+                let res = decrypter.update_to_vec(&value[..]).await?;
+                yield Bytes::from(res);
+            }
+            if !decrypter.is_finalized() {
+                Err(io::Error::from(SaltlickError::Incomplete))?
+            }
+        }
     }
 }
 
-impl<S, E> Stream for SaltlickDecrypterStream<S>
-where
-    E: Into<io::Error> + 'static,
-    S: Stream<Item = Result<Bytes, E>> + 'static,
-{
+impl Stream for SaltlickDecrypterStream {
     type Item = io::Result<Bytes>;
-
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<io::Result<Bytes>>> {
-        let mut this = self.project();
-        loop {
-            let result = match ready!(this.inner.as_mut().poll_next(cx)) {
-                Some(Ok(input)) => {
-                    let decrypted = this.decrypter.update_to_vec(&input[..])?;
-                    if !decrypted.is_empty() {
-                        Some(Ok(Bytes::from(decrypted)))
-                    } else {
-                        continue;
-                    }
-                }
-                Some(Err(e)) => Some(Err(e.into())),
-                None if !this.decrypter.is_finalized() => {
-                    Some(Err(SaltlickError::Incomplete.into()))
-                }
-                None => None,
-            };
-            return result.into();
-        }
+        self.project().inner.as_mut().poll_next(cx)
     }
 }
 
@@ -185,9 +190,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::{SaltlickDecrypterStream, SaltlickEncrypterStream};
-    use crate::{key::gen_keypair, testutils::random_bytes};
+    use crate::{
+        key::{gen_keypair, PublicKey, SecretKey},
+        testutils::random_bytes,
+    };
     use bytes::{Bytes, BytesMut};
     use futures::Stream;
+    use lazy_static::lazy_static;
     use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use std::{cmp, io};
@@ -217,6 +226,29 @@ mod tests {
                 .unwrap();
             assert_eq!(&random_data[..], &output[..]);
         }
+    }
+
+    lazy_static! {
+        static ref ASYNC_KEYS: (PublicKey, SecretKey) = gen_keypair();
+    }
+
+    async fn key_lookup(_public_key: PublicKey) -> Option<SecretKey> {
+        Some(ASYNC_KEYS.1.clone())
+    }
+
+    #[tokio::test]
+    async fn async_key_lookup_test() {
+        let random_data = random_bytes(2, 1024);
+        let input_stream =
+            stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+        let encrypter = SaltlickEncrypterStream::new(ASYNC_KEYS.0.clone(), input_stream);
+        let decrypter = SaltlickDecrypterStream::new_deferred_async(encrypter, key_lookup);
+
+        let output: Bytes = decrypter
+            .collect::<Result<Bytes, io::Error>>()
+            .await
+            .unwrap();
+        assert_eq!(&random_data[..], &output[..]);
     }
 
     fn random_chunks(seed: u64, data: &[u8]) -> impl Stream<Item = io::Result<Bytes>> {
@@ -323,16 +355,13 @@ mod tests {
 
     #[tokio::test]
     async fn into_inner_test() {
-        // Making sure that passing a stream through the encrypter/decrypter
-        // and not performing any operations still returns the untouched input
-        // stream.
+        // Making sure that passing a stream through the encrypter and not performing
+        // any operations still returns the untouched input stream.
         let random_data = random_bytes(0, 100 * 1024);
-        let (public_key, secret_key) = gen_keypair();
+        let (public_key, _secret_key) = gen_keypair();
         let input_stream =
             stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
         let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
-        let decrypter = SaltlickDecrypterStream::new(public_key, secret_key, encrypter);
-        let encrypter = decrypter.into_inner();
         let mut input_stream = encrypter.into_inner();
         assert_eq!(
             Bytes::copy_from_slice(&random_data[..]),
