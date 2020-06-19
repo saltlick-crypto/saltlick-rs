@@ -53,6 +53,8 @@ use crate::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BytesMut};
+#[cfg(feature = "io-async")]
+use futures::{future::BoxFuture, Future};
 use sodiumoxide::crypto::secretstream::{self, Header, Key, Pull, Push, Stream, Tag};
 use std::{cmp, fmt, io::Write, mem};
 
@@ -325,11 +327,15 @@ impl StateMachine for Encrypter {
 }
 
 type KeyLookupFn = Box<dyn FnOnce(&PublicKey) -> Option<SecretKey>>;
+#[cfg(feature = "io-async")]
+type KeyLookupFnAsync = Box<dyn FnOnce(PublicKey) -> BoxFuture<'static, Option<SecretKey>>>;
 
 #[derive(strum_macros::AsRefStr)]
 pub(crate) enum KeyResolution {
     Available(PublicKey, SecretKey),
     Deferred(KeyLookupFn),
+    #[cfg(feature = "io-async")]
+    DeferredAsync(KeyLookupFnAsync),
 }
 
 impl fmt::Debug for KeyResolution {
@@ -340,10 +346,10 @@ impl fmt::Debug for KeyResolution {
 
 #[derive(strum_macros::AsRefStr)]
 pub(crate) enum DecrypterState {
-    ReadPreheader(KeyResolution),
-    ReadPublicKey(KeyResolution),
-    SecretKeyLookup(PublicKey, KeyLookupFn),
-    ReadHeader(PublicKey, PublicKey, SecretKey),
+    ReadPreheader,
+    ReadPublicKey,
+    SecretKeyLookup(PublicKey),
+    ReadHeader(PublicKey, SecretKey),
     OpenStream(Key, Header),
     ReadLength(Stream<Pull>),
     ReadBlock(Stream<Pull>, usize),
@@ -358,6 +364,12 @@ impl fmt::Debug for DecrypterState {
     }
 }
 
+/// Result of update call (read, written) or required secret key
+pub enum UpdateReturn {
+    Progress(usize, usize),
+    NeedSecretKey(usize, usize, PublicKey),
+}
+
 /// Low-level interface to decrypting data in the saltlick format.
 #[derive(Debug)]
 pub struct Decrypter {
@@ -366,6 +378,7 @@ pub struct Decrypter {
     last_block_size: Option<usize>,
     plaintext: Vec<u8>,
     state: Option<DecrypterState>,
+    key_resolution: Option<KeyResolution>,
 }
 
 impl Decrypter {
@@ -377,7 +390,8 @@ impl Decrypter {
             consumed: 0,
             last_block_size: None,
             plaintext: Vec::new(),
-            state: Some(DecrypterState::ReadPreheader(key)),
+            state: Some(DecrypterState::ReadPreheader),
+            key_resolution: Some(key),
         }
     }
 
@@ -400,7 +414,8 @@ impl Decrypter {
             consumed: 0,
             last_block_size: None,
             plaintext: Vec::new(),
-            state: Some(DecrypterState::ReadPreheader(key)),
+            state: Some(DecrypterState::ReadPreheader),
+            key_resolution: Some(key),
         }
     }
 
@@ -414,83 +429,106 @@ impl Decrypter {
         mut input: &[u8],
         mut output: &mut [u8],
     ) -> Result<(usize, usize), SaltlickError> {
+        match self.update_inner(&mut input, &mut output, None)? {
+            UpdateReturn::Progress(nread, nwritten) => Ok((nread, nwritten)),
+            UpdateReturn::NeedSecretKey(nread, nwritten, public_key) => {
+                let secret = match self.key_resolution.take() {
+                    Some(KeyResolution::Available(public, secret)) => {
+                        if public == public_key {
+                            Ok(secret.clone())
+                        } else {
+                            Err(SaltlickError::PublicKeyMismatch)
+                        }
+                    },
+                    Some(KeyResolution::Deferred(lookup_fn)) => {
+                        lookup_fn(&public_key).ok_or(SaltlickError::SecretKeyNotFound)
+                    },
+                    #[cfg(feature = "io-async")]
+                    Some(_) => panic!("Async key resolution requires async update call!"),
+                    None => Err(SaltlickError::SecretKeyNotFound),
+                }?;
+                match self.update_inner(&mut input, &mut output, Some(secret))? {
+                    UpdateReturn::Progress(read, written) => Ok((nread + read, nwritten + written)),
+                    _ => panic!("Idk fix this plz"),
+                }
+            },
+        }
+    }
+
+    fn update_inner(
+        &mut self,
+        input: &mut &[u8],
+        output: &mut &mut [u8],
+        secret_key: Option<SecretKey>
+    ) -> Result<UpdateReturn, SaltlickError> {
         use self::DecrypterState::*;
         let mut nread = 0;
         let mut nwritten = 0;
+        use UpdateReturn::{Progress, NeedSecretKey};
         state::turn(self, |next, self_| match next {
-            ReadPreheader(key_resolution) => match read::preheader(&self_.ciphertext)? {
+            ReadPreheader => match read::preheader(&self_.ciphertext)? {
                 ReadStatus::Complete(version, n) => {
                     self_.ciphertext.advance(n);
                     if version != Version::V1 {
                         state::err(SaltlickError::UnsupportedVersion)
                     } else {
-                        state::next(ReadPublicKey(key_resolution))
+                        state::next(ReadPublicKey)
                     }
                 }
                 ReadStatus::Incomplete(_needed) if input.is_empty() => {
-                    state::ret((nread, nwritten), ReadPreheader(key_resolution))
+                    state::ret(Progress(nread, nwritten), ReadPreheader)
                 }
                 ReadStatus::Incomplete(needed) => {
                     let take = cmp::min(needed, input.len());
                     self_.ciphertext.extend_from_slice(&input[..take]);
-                    advance_slice(&mut input, take);
+                    advance_slice(&mut *input, take);
                     nread += take;
-                    state::next(ReadPreheader(key_resolution))
+                    state::next(ReadPreheader)
                 }
             },
-            ReadPublicKey(key_resolution) => match read::header_v1_public_key(&self_.ciphertext)? {
+            ReadPublicKey => match read::header_v1_public_key(&self_.ciphertext)? {
                 ReadStatus::Complete(file_public_key, n) => {
                     self_.ciphertext.advance(n);
-                    match key_resolution {
-                        KeyResolution::Available(public_key, secret_key) => {
-                            state::next(ReadHeader(file_public_key, public_key, secret_key))
-                        }
-                        KeyResolution::Deferred(lookup_fn) => {
-                            state::next(SecretKeyLookup(file_public_key, lookup_fn))
-                        }
-                    }
+                    state::ret(NeedSecretKey(
+                            nread,
+                            nwritten,
+                            file_public_key.clone()),
+                        SecretKeyLookup(file_public_key))
                 }
                 ReadStatus::Incomplete(_needed) if input.is_empty() => {
-                    state::ret((nread, nwritten), ReadPublicKey(key_resolution))
+                    state::ret(Progress(nread, nwritten), ReadPublicKey)
                 }
                 ReadStatus::Incomplete(needed) => {
                     let take = cmp::min(needed, input.len());
                     self_.ciphertext.extend_from_slice(&input[..take]);
-                    advance_slice(&mut input, take);
+                    advance_slice(&mut *input, take);
                     nread += take;
-                    state::next(ReadPublicKey(key_resolution))
+                    state::next(ReadPublicKey)
                 }
             },
-            SecretKeyLookup(file_public_key, lookup_fn) => {
-                if let Some(secret_key) = lookup_fn(&file_public_key) {
-                    state::next(ReadHeader(
-                        file_public_key.clone(),
-                        file_public_key,
-                        secret_key,
-                    ))
+            SecretKeyLookup(file_public_key) => {
+                if let Some(secret) = secret_key.clone() {
+                    state::next(ReadHeader(file_public_key, secret))
                 } else {
-                    state::err(SaltlickError::SecretKeyNotFound)
+                    return state::err(SaltlickError::SecretKeyNotFound);
                 }
             }
-            ReadHeader(file_public_key, public_key, secret_key) => {
-                if file_public_key != public_key {
-                    return state::err(SaltlickError::PublicKeyMismatch);
-                }
+            ReadHeader(public_key, secret_key) => {
                 match read::header_v1_sealed_text(&self_.ciphertext, &public_key, &secret_key)? {
                     ReadStatus::Complete((key, header), n) => {
                         self_.ciphertext.advance(n);
                         state::next(OpenStream(key, header))
                     }
                     ReadStatus::Incomplete(_needed) if input.is_empty() => state::ret(
-                        (nread, nwritten),
-                        ReadHeader(file_public_key, public_key, secret_key),
+                        Progress(nread, nwritten),
+                        ReadHeader(public_key, secret_key),
                     ),
                     ReadStatus::Incomplete(needed) => {
                         let take = cmp::min(needed, input.len());
                         self_.ciphertext.extend_from_slice(&input[..take]);
-                        advance_slice(&mut input, take);
+                        advance_slice(&mut *input, take);
                         nread += take;
-                        state::next(ReadHeader(file_public_key, public_key, secret_key))
+                        state::next(ReadHeader(public_key, secret_key))
                     }
                 }
             }
@@ -505,12 +543,12 @@ impl Decrypter {
                     state::next(ReadBlock(stream, length))
                 }
                 ReadStatus::Incomplete(_needed) if input.is_empty() => {
-                    state::ret((nread, nwritten), ReadLength(stream))
+                    state::ret(Progress(nread, nwritten), ReadLength(stream))
                 }
                 ReadStatus::Incomplete(needed) => {
                     let take = cmp::min(needed, input.len());
                     self_.ciphertext.extend_from_slice(&input[..take]);
-                    advance_slice(&mut input, take);
+                    advance_slice(&mut *input, take);
                     nread += take;
                     state::next(ReadLength(stream))
                 }
@@ -523,12 +561,12 @@ impl Decrypter {
                         state::next(FlushOutput(stream, finalized))
                     }
                     ReadStatus::Incomplete(_needed) if input.is_empty() => {
-                        state::ret((nread, nwritten), ReadBlock(stream, length))
+                        state::ret(Progress(nread, nwritten), ReadBlock(stream, length))
                     }
                     ReadStatus::Incomplete(needed) => {
                         let take = cmp::min(needed, input.len());
                         self_.ciphertext.extend_from_slice(&input[..take]);
-                        advance_slice(&mut input, take);
+                        advance_slice(&mut *input, take);
                         nread += take;
                         state::next(ReadBlock(stream, length))
                     }
@@ -542,7 +580,7 @@ impl Decrypter {
                         state::next(ReadLength(stream))
                     }
                 } else if output.is_empty() {
-                    state::ret((nread, nwritten), FlushOutput(stream, finalized))
+                    state::ret(Progress(nread, nwritten), FlushOutput(stream, finalized))
                 } else {
                     let take = cmp::min(output.len(), self_.plaintext_len());
                     let n = output
@@ -553,7 +591,7 @@ impl Decrypter {
                     state::next(FlushOutput(stream, finalized))
                 }
             }
-            Finalized => state::ret((nread, nwritten), Finalized),
+            Finalized => state::ret(Progress(nread, nwritten), Finalized),
             Errored => state::err(SaltlickError::StateMachineErrored),
         })
     }
@@ -595,7 +633,7 @@ impl Decrypter {
 
 impl StateMachine for Decrypter {
     type State = DecrypterState;
-    type Return = (usize, usize);
+    type Return = UpdateReturn;
     type Error = SaltlickError;
 
     fn take_state(&mut self) -> Self::State {
@@ -608,6 +646,114 @@ impl StateMachine for Decrypter {
 
     fn put_state(&mut self, state: Self::State) {
         self.state = Some(state);
+    }
+}
+
+/// Wrapper type for the decrypter to support async key lookup functions
+#[cfg(feature = "io-async")]
+#[derive(Debug)]
+pub struct DecrypterAsyncKey {
+    inner: Decrypter,
+}
+
+#[cfg(feature = "io-async")]
+impl DecrypterAsyncKey {
+    /// Create a new decrypter using provided keys
+    pub fn new(public_key: PublicKey, secret_key: SecretKey) -> DecrypterAsyncKey {
+        DecrypterAsyncKey { inner: Decrypter::new(public_key, secret_key) }
+    }
+
+    /// Create a synchronous key lookup decrypter inner.
+    pub fn new_deferred<F>(lookup_fn: F) -> DecrypterAsyncKey
+    where
+        F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
+    {
+        DecrypterAsyncKey { inner: Decrypter::new_deferred(lookup_fn) }
+    }
+
+    /// Create a new async key lookup decrypter. This functions exactly like the
+    /// synchronous version of deferred key lookup but supports providing an async
+    /// function.
+    pub fn new_deferred_async<F>(lookup_fn: impl FnOnce(PublicKey) -> F + 'static) -> DecrypterAsyncKey
+    where
+        F: Future<Output = Option<SecretKey>> + Send + 'static,
+    {
+        let key = KeyResolution::DeferredAsync(Box::new(move |k| Box::pin(lookup_fn(k))));
+        let inner = Decrypter {
+            ciphertext: BytesMut::new(),
+            consumed: 0,
+            last_block_size: None,
+            plaintext: Vec::new(),
+            state: Some(DecrypterState::ReadPreheader),
+            key_resolution: Some(key),
+        };
+
+        DecrypterAsyncKey { inner }
+    }
+
+    /// Wrapper for the synchronous update function that supports the
+    /// async key lookup.
+    pub async fn update(
+        &mut self,
+        mut input: &[u8],
+        mut output: &mut [u8],
+    ) -> Result<(usize, usize), SaltlickError> {
+        match self.inner.update_inner(&mut input, &mut output, None)? {
+            UpdateReturn::Progress(nread, nwritten) => Ok((nread, nwritten)),
+            UpdateReturn::NeedSecretKey(nread, nwritten, public_key) => {
+                let secret = match self.inner.key_resolution.take() {
+                    Some(KeyResolution::Available(public, secret)) => {
+                        if public == public_key {
+                            Ok(secret)
+                        } else {
+                            Err(SaltlickError::PublicKeyMismatch)
+                        }
+                    },
+                    Some(KeyResolution::Deferred(lookup_fn)) => {
+                        if let Some(secret) = lookup_fn(&public_key) {
+                            Ok(secret)
+                        } else {
+                            Err(SaltlickError::SecretKeyNotFound)
+                        }
+                    },
+                    Some(KeyResolution::DeferredAsync(lookup_fn)) => {
+                        if let Some(secret) = lookup_fn(public_key).await {
+                            Ok(secret)
+                        } else {
+                            Err(SaltlickError::SecretKeyNotFound)
+                        }
+                    },
+                    None => Err(SaltlickError::SecretKeyNotFound),
+                }?;
+                match self.inner.update_inner(&mut input, &mut output, Some(secret))? {
+                    UpdateReturn::Progress(read, written) => Ok((nread + read, nwritten + written)),
+                    _ => Err(SaltlickError::SecretKeyNotFound),
+                }
+            },
+        }
+    }
+
+    /// Convenience version of `update` that allocates and returns output data
+    /// as a `Vec<u8>`.
+    pub async fn update_to_vec(&mut self, input: impl AsRef<[u8]>) -> Result<Vec<u8>, SaltlickError> {
+        let input = input.as_ref();
+        let mut plaintext = vec![0u8; self.inner.estimate_output_size(input.len())];
+        let (rd, wr) = self.update(input, &mut plaintext).await?;
+
+        // The decrypter never buffers more than 1 complete block, and input
+        // data will never decrypt larger than the ciphertext size. Since we
+        // allocate space for 2 complete blocks plus the input size, we will
+        // always consume the entire input. If we don't, an assumption has
+        // broken down and the output is not valid.
+        assert!(rd == input.len());
+
+        plaintext.truncate(wr);
+        Ok(plaintext)
+    }
+
+    /// Returns true if the crypter has been finalized.
+    pub fn is_finalized(&self) -> bool {
+        self.inner.is_finalized()
     }
 }
 
@@ -774,7 +920,7 @@ mod testutils {
 
 #[cfg(test)]
 mod tests {
-    use super::{testutils::random_bytes, Decrypter, Encrypter, KeyResolution};
+    use super::{testutils::random_bytes, Decrypter, DecrypterAsyncKey, Encrypter, KeyResolution};
     use crate::{error::SaltlickError, key};
 
     #[test]
@@ -832,12 +978,26 @@ mod tests {
     fn deferred_key_load_test() {
         let test_data = random_bytes(4, 25000);
         let (public, secret) = key::gen_keypair();
-
         let mut encrypter = Encrypter::new(public);
         let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
 
         let mut decrypter = Decrypter::new_deferred(move |_public| Some(secret));
         let plaintext = decrypter.update_to_vec(&ciphertext[..]).unwrap();
+        assert!(decrypter.is_finalized());
+        assert_eq!(test_data, plaintext);
+    }
+
+    #[cfg(feature = "io-async")]
+    #[tokio::test]
+    async fn deferred_async_key_load_test() {
+        let test_data = random_bytes(4, 25000);
+        let (public, secret) = key::gen_keypair();
+
+        let mut encrypter = Encrypter::new(public);
+        let ciphertext = encrypter.update_to_vec(&test_data[..], true).unwrap();
+
+        let mut decrypter = DecrypterAsyncKey::new_deferred_async(|_public| async move {Some(secret)});
+        let plaintext = decrypter.update_to_vec(&ciphertext[..]).await.unwrap();
         assert!(decrypter.is_finalized());
         assert_eq!(test_data, plaintext);
     }

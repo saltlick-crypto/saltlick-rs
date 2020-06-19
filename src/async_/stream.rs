@@ -11,12 +11,13 @@
 //! [`Stream`]: https://docs.rs/futures/0.3/futures/stream/trait.Stream.html
 
 use crate::{
-    crypter::{Decrypter, Encrypter},
+    crypter::{DecrypterAsyncKey, Encrypter},
     error::SaltlickError,
     key::{PublicKey, SecretKey},
 };
 use bytes::Bytes;
 use futures::{
+    Future,
     ready,
     stream::{Fuse, Stream, StreamExt},
 };
@@ -40,7 +41,7 @@ pin_project! {
     #[cfg_attr(docsrs, doc(cfg(feature = "io-async")))]
     #[derive(Debug)]
     pub struct SaltlickDecrypterStream<S> {
-        decrypter: Decrypter,
+        decrypter: DecrypterAsyncKey,
         #[pin]
         inner: Fuse<S>,
     }
@@ -57,7 +58,7 @@ where
         stream: S,
     ) -> SaltlickDecrypterStream<S> {
         SaltlickDecrypterStream {
-            decrypter: Decrypter::new(public_key, secret_key),
+            decrypter: DecrypterAsyncKey::new(public_key, secret_key),
             inner: stream.fuse(),
         }
     }
@@ -69,7 +70,19 @@ where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
     {
         SaltlickDecrypterStream {
-            decrypter: Decrypter::new_deferred(lookup_fn),
+            decrypter: DecrypterAsyncKey::new_deferred(lookup_fn),
+            inner: stream.fuse(),
+        }
+    }
+
+    /// Create a new decryption layer over 'stream' using an async lookup function
+    /// to perform the key match
+    pub fn new_deferred_async<F>(stream: S, lookup_fn: impl FnOnce(PublicKey) -> F + 'static) -> SaltlickDecrypterStream<S>
+    where
+        F: Future<Output = Option<SecretKey>> + Send + 'static,
+    {
+        SaltlickDecrypterStream {
+            decrypter: DecrypterAsyncKey::new_deferred_async(lookup_fn),
             inner: stream.fuse(),
         }
     }
@@ -92,7 +105,7 @@ where
         loop {
             let result = match ready!(this.inner.as_mut().poll_next(cx)) {
                 Some(Ok(input)) => {
-                    let decrypted = this.decrypter.update_to_vec(&input[..])?;
+                    let decrypted = ready!(Box::pin(this.decrypter.update_to_vec(&input[..])).as_mut().poll(cx))?;
                     if !decrypted.is_empty() {
                         Some(Ok(Bytes::from(decrypted)))
                     } else {
