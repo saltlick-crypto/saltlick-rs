@@ -17,6 +17,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::{
+    future::LocalBoxFuture,
     Future,
     ready,
     stream::{Fuse, Stream, StreamExt},
@@ -39,15 +40,16 @@ pin_project! {
     /// to complete decryption successfully, as the libsodium crypto relies on
     /// an end-of-stream tag to provide guarantees of completeness.
     #[cfg_attr(docsrs, doc(cfg(feature = "io-async")))]
-    #[derive(Debug)]
-    pub struct SaltlickDecrypterStream<S> {
+//    #[derive(Debug)]
+    pub struct SaltlickDecrypterStream<'a, S> {
         decrypter: DecrypterAsyncKey,
+        decrypter_future: Option<LocalBoxFuture<'a, Result<Vec<u8>, SaltlickError>>>,
         #[pin]
         inner: Fuse<S>,
     }
 }
 
-impl<S, E> SaltlickDecrypterStream<S>
+impl<'a, S, E> SaltlickDecrypterStream<'a, S>
 where
     S: Stream<Item = Result<Bytes, E>> + 'static,
 {
@@ -56,33 +58,36 @@ where
         public_key: PublicKey,
         secret_key: SecretKey,
         stream: S,
-    ) -> SaltlickDecrypterStream<S> {
+    ) -> SaltlickDecrypterStream<'static, S> {
         SaltlickDecrypterStream {
             decrypter: DecrypterAsyncKey::new(public_key, secret_key),
+            decrypter_future: None,
             inner: stream.fuse(),
         }
     }
 
     /// Create a new decryption layer over `stream`, using `lookup_fn` to match
     /// the stream's `public_key` to its `secret_key`.
-    pub fn new_deferred<F>(stream: S, lookup_fn: F) -> SaltlickDecrypterStream<S>
+    pub fn new_deferred<F>(stream: S, lookup_fn: F) -> SaltlickDecrypterStream<'static, S>
     where
         F: FnOnce(&PublicKey) -> Option<SecretKey> + 'static,
     {
         SaltlickDecrypterStream {
             decrypter: DecrypterAsyncKey::new_deferred(lookup_fn),
+            decrypter_future: None,
             inner: stream.fuse(),
         }
     }
 
     /// Create a new decryption layer over 'stream' using an async lookup function
     /// to perform the key match
-    pub fn new_deferred_async<F>(stream: S, lookup_fn: impl FnOnce(PublicKey) -> F + 'static) -> SaltlickDecrypterStream<S>
+    pub fn new_deferred_async<F>(stream: S, lookup_fn: impl FnOnce(PublicKey) -> F + 'static) -> SaltlickDecrypterStream<'static, S>
     where
         F: Future<Output = Option<SecretKey>> + Send + 'static,
     {
         SaltlickDecrypterStream {
             decrypter: DecrypterAsyncKey::new_deferred_async(lookup_fn),
+            decrypter_future: None,
             inner: stream.fuse(),
         }
     }
@@ -93,7 +98,7 @@ where
     }
 }
 
-impl<S, E> Stream for SaltlickDecrypterStream<S>
+impl<'a, S, E> Stream for SaltlickDecrypterStream<'a, S>
 where
     E: Into<io::Error> + 'static,
     S: Stream<Item = Result<Bytes, E>> + 'static,
@@ -105,11 +110,27 @@ where
         loop {
             let result = match ready!(this.inner.as_mut().poll_next(cx)) {
                 Some(Ok(input)) => {
-                    let decrypted = ready!(Box::pin(this.decrypter.update_to_vec(&input[..])).as_mut().poll(cx))?;
-                    if !decrypted.is_empty() {
-                        Some(Ok(Bytes::from(decrypted)))
-                    } else {
-                        continue;
+                    println!("Polling internal decrypter");
+                    let fut = match this.decrypter_future.take() {
+                        Some(fut) => fut,
+                        None => Box::pin(this.decrypter.update_to_vec(&input[..])),
+                    };
+                    let future_res = fut.as_mut().poll(cx);
+                    match future_res {
+                        Poll::Ready(Ok(decrypted)) => {
+                            if !decrypted.is_empty() {
+                                Some(Ok(Bytes::from(decrypted)))
+                            } else {
+                                continue;
+                            }
+                        },
+                        Poll::Ready(Err(e)) => {
+                            Some(Err(e.into()))
+                        },
+                        Poll::Pending => {
+                            *this.decrypter_future = Some(fut);
+                            return Poll::Pending;
+                        },
                     }
                 }
                 Some(Err(e)) => Some(Err(e.into())),
