@@ -650,8 +650,8 @@ impl StateMachine for Decrypter {
 }
 
 /// Wrapper type for the decrypter to support async key lookup functions
-#[cfg(feature = "io-async")]
 #[derive(Debug)]
+#[cfg(feature = "io-async")]
 pub struct DecrypterAsyncKey {
     inner: Decrypter,
 }
