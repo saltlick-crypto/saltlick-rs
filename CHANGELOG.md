@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Bump MSRV from 1.39 to 1.42
 
+- Add support for async key lookups by way of a `AsyncDecrypter` type which
+  wraps the decryption state machine into a `DecrypterInner` type (with
+  synchronous key lookup being done by the now-wrapper type `Decrypter`).
+- Replace `Decrypter` with `AsyncDecrypter` type in `AsyncDecrypterStream` to
+  support using async key lookup functions when using the decrypter stream.
+
 ## [0.3.0] - 2020-03-20
 ### Added
 - Add `Encrypter` and `Decrypter` methods `update_to_vec`, which automatically
