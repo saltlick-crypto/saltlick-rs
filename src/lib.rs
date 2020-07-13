@@ -30,7 +30,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! saltlick = "0.3"
+//! saltlick = "0.4"
 //! ```
 //!
 //! Next:
