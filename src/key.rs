@@ -8,7 +8,6 @@
 
 use crate::error::{SaltlickError, SaltlickKeyIoError};
 use lazy_static::lazy_static;
-use pem;
 use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, BigUint, FromASN1, ToASN1, OID};
 use sodiumoxide::crypto::box_::{PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
 use std::{
