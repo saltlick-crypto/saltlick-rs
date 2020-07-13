@@ -15,21 +15,21 @@ jobs:
 
     - stage: check
       name: rustfmt
-      rust: 1.41.1
+      rust: 1.44.1
       install:
         - rustup component add rustfmt
       script:
         - cargo fmt -- --check
     - name: "clippy-and-warnings"
       env: RUSTFLAGS="-D warnings"
-      rust: 1.41.1
+      rust: 1.44.1
       install:
         - rustup component add clippy
       script:
         - cargo clippy --all-features --benches --bins --examples --tests -- -D clippy::all
 
     - stage: test
-      rust: 1.39.0  # Oldest supported
+      rust: 1.42.0  # Oldest supported
     - name: "Rust: stable + proptests"
       rust: stable
       script:
