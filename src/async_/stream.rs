@@ -99,6 +99,9 @@ impl SaltlickDecrypterStream {
             while let Some(value) = stream.next().await {
                 let value = value?;
                 let res = decrypter.update_to_vec(&value[..]).await?;
+                if res.is_empty() {
+                    continue;
+                }
                 yield Bytes::from(res);
             }
             if !decrypter.is_finalized() {
