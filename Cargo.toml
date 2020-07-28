@@ -42,12 +42,19 @@ tempdir = "0.3"
 
 [dev-dependencies.tokio]
 version = "0.2"
-features = ["io-util", "macros", "rt-threaded", "stream"]
+features = ["fs", "io-util", "macros", "rt-threaded", "stream"]
 
 [features]
 default = []
 io-async = ["async-stream", "futures", "pin-project-lite", "tokio"]
 proptest-tests = []
+
+[[example]]
+name = "simple"
+
+[[example]]
+name = "simple_async"
+required-features = ["io-async"]
 
 [package.metadata.docs.rs]
 all-features = true
