@@ -31,7 +31,7 @@ sodiumoxide = "0.2.3"  # 0.2.3 required for `(push|pull)_to_vec`
 strum = "0.20"
 strum_macros = "0.20"
 thiserror = "1.0"
-tokio = { version = "0.2", optional = true }
+tokio = { version = "1.2", optional = true }
 
 [dev-dependencies]
 async-stream = "0.2"
@@ -41,7 +41,7 @@ rand_xorshift = "0.2"
 tempdir = "0.3"
 
 [dev-dependencies.tokio]
-version = "0.2"
+version = "1.2"
 features = ["fs", "io-util", "macros", "rt-threaded", "stream"]
 
 [features]
