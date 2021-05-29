@@ -36,7 +36,7 @@ tokio = { version = "0.2", optional = true }
 [dev-dependencies]
 async-stream = "0.2"
 proptest = "0.10"
-rand = "0.7"
+rand = "0.8"
 rand_xorshift = "0.2"
 tempdir = "0.3"
 
