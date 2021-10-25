@@ -26,7 +26,7 @@ futures = { version = "0.3", optional = true }
 lazy_static = "1.0"
 pem = "0.8"
 pin-project-lite = { version = "0.2", optional = true }
-simple_asn1 = "0.5"
+simple_asn1 = "0.6"
 sodiumoxide = "0.2.3"  # 0.2.3 required for `(push|pull)_to_vec`
 strum = "0.20"
 strum_macros = "0.20"
