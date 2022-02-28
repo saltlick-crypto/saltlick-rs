@@ -28,7 +28,7 @@ pem = "0.8"
 pin-project-lite = { version = "0.2", optional = true }
 simple_asn1 = "0.5"
 sodiumoxide = "0.2.3"  # 0.2.3 required for `(push|pull)_to_vec`
-strum = "0.20"
+strum = "0.24"
 strum_macros = "0.20"
 thiserror = "1.0"
 tokio = { version = "0.2", optional = true }
