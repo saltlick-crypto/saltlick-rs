@@ -17,11 +17,10 @@ use crate::{
 };
 use pin_project_lite::pin_project;
 use std::{
-    io,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncBufRead, AsyncRead};
+use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 
 pin_project! {
     /// Wraps an underlying reader with decryption using the saltlick format.
@@ -81,8 +80,8 @@ impl<R: AsyncBufRead> AsyncRead for AsyncSaltlickDecrypter<R> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        output: &mut [u8],
-    ) -> Poll<Result<usize, io::Error>> {
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.project();
         commonio::poll_read(this.inner, cx, this.decrypter, output)
     }
@@ -133,8 +132,8 @@ impl<R: AsyncBufRead> AsyncRead for AsyncSaltlickEncrypter<R> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        output: &mut [u8],
-    ) -> Poll<Result<usize, io::Error>> {
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.project();
         commonio::poll_read(this.inner, cx, this.encrypter, output)
     }

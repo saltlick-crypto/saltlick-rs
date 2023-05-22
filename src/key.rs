@@ -8,7 +8,7 @@
 
 use crate::error::{SaltlickError, SaltlickKeyIoError};
 use lazy_static::lazy_static;
-use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, BigUint, FromASN1, ToASN1, OID};
+use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, FromASN1, ToASN1, OID};
 use sodiumoxide::crypto::box_::{PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
 use std::{
     fs::{File, OpenOptions},
@@ -48,17 +48,14 @@ impl PublicKey {
 
     /// Load public key from PEM string.
     pub fn from_pem(pem: &str) -> Result<PublicKey, SaltlickError> {
-        let pem::Pem { contents, .. } = pem::parse(pem)?;
+        let contents = pem::parse(pem)?.into_contents();
         simple_asn1::der_decode::<Self>(&contents[..])
     }
 
     /// Export public key as PEM-encoded string.
     pub fn to_pem(&self) -> String {
         let der = simple_asn1::der_encode(self).expect("DER-encoding of PublicKey cannot fail");
-        pem::encode(&pem::Pem {
-            tag: String::from("PUBLIC KEY"),
-            contents: der,
-        })
+        pem::encode(&pem::Pem::new(String::from("PUBLIC KEY"), der))
     }
 
     /// Load a public key in PEM format from `path`.
@@ -180,17 +177,14 @@ impl SecretKey {
 
     /// Load secret key from PEM file.
     pub fn from_pem(pem: &str) -> Result<SecretKey, SaltlickError> {
-        let pem::Pem { contents, .. } = pem::parse(pem)?;
+        let contents = pem::parse(pem)?.into_contents();
         simple_asn1::der_decode::<Self>(&contents[..])
     }
 
     /// Export secret key as PEM-encoded string.
     pub fn to_pem(&self) -> String {
         let der = simple_asn1::der_encode(self).expect("DER-encoding of SecretKey cannot fail");
-        pem::encode(&pem::Pem {
-            tag: String::from("PRIVATE KEY"),
-            contents: der,
-        })
+        pem::encode(&pem::Pem::new(String::from("PRIVATE KEY"), der))
     }
 
     /// Load a secret key in PEM format from `path`.
