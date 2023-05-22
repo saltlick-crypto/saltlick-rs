@@ -9,45 +9,44 @@
 use crate::commonio::CommonOps;
 use futures::ready;
 use std::{
-    io,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncBufRead, AsyncWrite};
+use tokio::io::{AsyncBufRead, AsyncWrite, ReadBuf};
 
 pub(crate) fn poll_read<R, Ops>(
     mut reader: Pin<&mut R>,
     cx: &mut Context<'_>,
     ops: &mut Ops,
-    output: &mut [u8],
-) -> Poll<io::Result<usize>>
+    output: &mut ReadBuf<'_>,
+) -> Poll<std::io::Result<()>>
 where
     R: AsyncBufRead,
     Ops: CommonOps,
 {
-    let mut nwritten = 0;
     loop {
-        if ops.is_finalized() || nwritten >= output.len() {
-            return Poll::Ready(Ok(nwritten));
+        if ops.is_finalized() || output.remaining() == 0 {
+            return Poll::Ready(Ok(()));
         }
 
         let eof;
         let (rd, wr) = {
             let input = ready!(reader.as_mut().poll_fill_buf(cx))?;
             eof = input.is_empty();
-            ops.run(input, &mut output[nwritten..])?
+            ops.run(input, output.initialize_unfilled())?
         };
         reader.as_mut().consume(rd);
-        nwritten += wr;
+        output.advance(wr);
 
         if wr == 0 {
             if eof && !ops.is_finalized() {
-                nwritten += ops.finalize(&mut output[nwritten..])?;
+                let wr = ops.finalize(output.initialize_unfilled())?;
+                output.advance(wr);
             } else {
                 continue;
             }
         } else {
-            return Poll::Ready(Ok(nwritten));
+            return Poll::Ready(Ok(()));
         }
     }
 }
@@ -72,14 +71,14 @@ impl AsyncBuffer {
         &mut self,
         mut writer: Pin<&mut W>,
         cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    ) -> Poll<std::io::Result<()>> {
         while self.available - self.consumed > 0 {
             let n = ready!(writer
                 .as_mut()
                 .poll_write(cx, &self.buffer[self.consumed..self.available]))?;
             if n == 0 {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
                     "failed to write the buffered data",
                 )));
             } else {
@@ -95,7 +94,7 @@ pub(crate) fn poll_write<W, Ops>(
     ops: &mut Ops,
     buffer: &mut AsyncBuffer,
     input: &[u8],
-) -> Poll<io::Result<usize>>
+) -> Poll<std::io::Result<usize>>
 where
     W: AsyncWrite,
     Ops: CommonOps,
@@ -124,7 +123,7 @@ pub(crate) fn poll_flush<W>(
     mut writer: Pin<&mut W>,
     cx: &mut Context<'_>,
     buffer: &mut AsyncBuffer,
-) -> Poll<io::Result<()>>
+) -> Poll<std::io::Result<()>>
 where
     W: AsyncWrite,
 {
@@ -137,7 +136,7 @@ pub(crate) fn poll_shutdown<W, Ops>(
     cx: &mut Context<'_>,
     ops: &mut Ops,
     buffer: &mut AsyncBuffer,
-) -> Poll<io::Result<()>>
+) -> Poll<std::io::Result<()>>
 where
     W: AsyncWrite,
     Ops: CommonOps,
