@@ -8,7 +8,7 @@
 
 use crate::error::{SaltlickError, SaltlickKeyIoError};
 use lazy_static::lazy_static;
-use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, BigUint, FromASN1, ToASN1, OID};
+use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, FromASN1, ToASN1, OID};
 use sodiumoxide::crypto::box_::{PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
 use std::{
     fs::{File, OpenOptions},
@@ -48,17 +48,14 @@ impl PublicKey {
 
     /// Load public key from PEM string.
     pub fn from_pem(pem: &str) -> Result<PublicKey, SaltlickError> {
-        let pem::Pem { contents, .. } = pem::parse(pem)?;
+        let contents = pem::parse(pem)?.into_contents();
         simple_asn1::der_decode::<Self>(&contents[..])
     }
 
     /// Export public key as PEM-encoded string.
     pub fn to_pem(&self) -> String {
         let der = simple_asn1::der_encode(self).expect("DER-encoding of PublicKey cannot fail");
-        pem::encode(&pem::Pem {
-            tag: String::from("PUBLIC KEY"),
-            contents: der,
-        })
+        pem::encode(&pem::Pem::new(String::from("PUBLIC KEY"), der))
     }
 
     /// Load a public key in PEM format from `path`.
@@ -104,7 +101,7 @@ impl FromASN1 for PublicKey {
     type Error = SaltlickError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        let key_seq = match v.get(0) {
+        let key_seq = match v.first() {
             Some(ASN1Block::Sequence(_, key_seq)) => key_seq,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
@@ -143,12 +140,12 @@ impl FromASN1 for Curve25519Algorithm {
     type Error = SaltlickError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        let alg_seq = match v.get(0) {
+        let alg_seq = match v.first() {
             Some(ASN1Block::Sequence(_, alg_seq)) => alg_seq,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
 
-        let oid = match alg_seq.get(0) {
+        let oid = match alg_seq.first() {
             Some(ASN1Block::ObjectIdentifier(_, oid)) => oid,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
@@ -180,17 +177,14 @@ impl SecretKey {
 
     /// Load secret key from PEM file.
     pub fn from_pem(pem: &str) -> Result<SecretKey, SaltlickError> {
-        let pem::Pem { contents, .. } = pem::parse(pem)?;
+        let contents = pem::parse(pem)?.into_contents();
         simple_asn1::der_decode::<Self>(&contents[..])
     }
 
     /// Export secret key as PEM-encoded string.
     pub fn to_pem(&self) -> String {
         let der = simple_asn1::der_encode(self).expect("DER-encoding of SecretKey cannot fail");
-        pem::encode(&pem::Pem {
-            tag: String::from("PRIVATE KEY"),
-            contents: der,
-        })
+        pem::encode(&pem::Pem::new(String::from("PRIVATE KEY"), der))
     }
 
     /// Load a secret key in PEM format from `path`.
@@ -235,13 +229,13 @@ impl FromASN1 for SecretKey {
     type Error = SaltlickError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        let key_seq = match v.get(0) {
+        let key_seq = match v.first() {
             Some(ASN1Block::Sequence(_, key_seq)) => key_seq,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
 
         // Checks that the version is 0
-        match key_seq.get(0) {
+        match key_seq.first() {
             Some(ASN1Block::Integer(_, big_int)) => {
                 if *big_int != BigInt::from(0u8) {
                     return Err(SaltlickError::UnsupportedVersion);
@@ -261,7 +255,7 @@ impl FromASN1 for SecretKey {
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
         let secret_key_block = simple_asn1::from_der(&secret_key_inner_der[..])?;
-        let secret_key = match secret_key_block.get(0) {
+        let secret_key = match secret_key_block.first() {
             Some(ASN1Block::OctetString(_, secret_key)) => secret_key,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
@@ -426,7 +420,7 @@ mod tests {
     #[test]
     fn not_a_pem_test() {
         let not_a_pem = "-----COMMENCE NOT A PEM-----";
-        assert!(PublicKey::from_pem(&not_a_pem).is_err());
-        assert!(SecretKey::from_pem(&not_a_pem).is_err());
+        assert!(PublicKey::from_pem(not_a_pem).is_err());
+        assert!(SecretKey::from_pem(not_a_pem).is_err());
     }
 }

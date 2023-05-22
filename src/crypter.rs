@@ -415,7 +415,7 @@ impl Decrypter {
         mut input: &[u8],
         mut output: &mut [u8],
     ) -> Result<(usize, usize), SaltlickError> {
-        match self.inner.update(input, &mut output, None)? {
+        match self.inner.update(input, output, None)? {
             UpdateReturn::Progress(nread, nwritten) => Ok((nread, nwritten)),
             UpdateReturn::NeedSecretKey(nread, nwritten, public_key) => {
                 let secret = match self.key_resolution.take() {
@@ -433,7 +433,7 @@ impl Decrypter {
                 }?;
                 advance_slice(&mut input, nread);
                 advance_slice_mut(&mut output, nwritten);
-                match self.inner.update(input, &mut output, Some(secret))? {
+                match self.inner.update(input, output, Some(secret))? {
                     UpdateReturn::Progress(read, written) => Ok((nread + read, nwritten + written)),
                     UpdateReturn::NeedSecretKey(_, _, _) => unreachable!(),
                 }
@@ -673,12 +673,12 @@ impl StateMachine for DecrypterInner {
 // some other data - all we're doing is updating the pointer so it points to a
 // new subset of that same data.
 pub(crate) fn advance_slice<T>(slice: &mut &[T], n: usize) {
-    let (_a, b) = mem::replace(slice, &[]).split_at(n);
+    let (_a, b) = std::mem::take(slice).split_at(n);
     *slice = b;
 }
 
 pub(crate) fn advance_slice_mut<T>(slice: &mut &mut [T], n: usize) {
-    let (_a, b) = mem::replace(slice, &mut []).split_at_mut(n);
+    let (_a, b) = std::mem::take(slice).split_at_mut(n);
     *slice = b;
 }
 
@@ -868,7 +868,7 @@ mod tests {
         let mut ciphertext = Vec::new();
         encrypter.set_block_size(1024);
         for byte in test_data.iter().copied() {
-            ciphertext.extend(encrypter.update_to_vec(&[byte], false).unwrap());
+            ciphertext.extend(encrypter.update_to_vec([byte], false).unwrap());
         }
         ciphertext.extend(encrypter.update_to_vec(&[] as &[u8], true).unwrap());
 
@@ -970,7 +970,7 @@ mod tests {
         // Trying to update again should return `StateMachineErrored`
         assert_eq!(
             SaltlickError::StateMachineErrored,
-            decrypter.update_to_vec(&[]).unwrap_err(),
+            decrypter.update_to_vec([]).unwrap_err(),
         );
     }
 

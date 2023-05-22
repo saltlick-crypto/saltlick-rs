@@ -1,6 +1,6 @@
 [package]
 name = "saltlick"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["Nick Stevens <nick@bitcurry.com>"]
 edition = "2018"
 description = "A library for encrypting and decrypting file streams using libsodium"
@@ -19,30 +19,31 @@ is-it-maintained-open-issues = { repository = "saltlick-crypto/saltlick-rs" }
 maintenance = { status = "actively-developed" }
 
 [dependencies]
-async-stream = { version = "0.2.1", optional = true }
+async-stream = { version = "0.3", optional = true }
 byteorder = "1.3"
-bytes = "0.5"
+bytes = "1"
 futures = { version = "0.3", optional = true }
 lazy_static = "1.0"
-pem = "0.8"
+pem = "3"
 pin-project-lite = { version = "0.2", optional = true }
-simple_asn1 = "0.5"
-sodiumoxide = "0.2.3"  # 0.2.3 required for `(push|pull)_to_vec`
-strum = "0.20"
-strum_macros = "0.20"
+simple_asn1 = "0.6"
+sodiumoxide = "0.2.3"                                   # 0.2.3 required for `(push|pull)_to_vec`
+strum = "0.26"
+strum_macros = "0.26"
 thiserror = "1.0"
-tokio = { version = "0.2", optional = true }
+tokio = { version = "1", optional = true }
 
 [dev-dependencies]
-async-stream = "0.2"
-proptest = "0.10"
-rand = "0.7"
-rand_xorshift = "0.2"
+async-stream = "0.3"
+proptest = "1"
+rand = "0.8"
+rand_xorshift = "0.3"
 tempdir = "0.3"
+tokio-stream = "0.1"
 
 [dev-dependencies.tokio]
-version = "0.2"
-features = ["fs", "io-util", "macros", "rt-threaded", "stream"]
+version = "1"
+features = ["fs", "io-util", "macros", "rt-multi-thread"]
 
 [features]
 default = []
