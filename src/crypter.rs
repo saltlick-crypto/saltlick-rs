@@ -53,7 +53,8 @@ use crate::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BytesMut};
-use sodiumoxide::crypto::secretstream::{self, Header, Key, Pull, Push, Stream, Tag};
+use crypto_box::aead::OsRng;
+use crypto_secretstream::{Header, Key, PullStream, Stream, Tag};
 use std::{cmp, fmt, io::Write, mem};
 
 #[cfg(feature = "io-async")]
@@ -72,14 +73,14 @@ pub const DEFAULT_BLOCK_SIZE: usize = 512 * 1024;
 
 const MAGIC: &[u8] = b"SALTLICK";
 const MAGIC_LEN: usize = 8;
-const MESSAGE_LEN_LEN: usize = secretstream::ABYTES + mem::size_of::<u32>();
+const MESSAGE_LEN_LEN: usize = Stream::ABYTES + mem::size_of::<u32>();
 
 #[derive(strum_macros::AsRefStr)]
 pub(crate) enum EncrypterState {
     Start,
-    FlushOutput(Stream<Push>),
-    NextBlock(Stream<Push>),
-    GenBlock(Stream<Push>, bool),
+    FlushOutput(PushStream),
+    NextBlock(PushStream),
+    GenBlock(PushStream, bool),
     Finalized,
     Errored,
 }
@@ -262,50 +263,38 @@ impl Encrypter {
 
     /// Returns true if the crypter has been finalized.
     pub fn is_finalized(&self) -> bool {
-        match self.state {
-            Some(EncrypterState::Finalized) => true,
-            _ => false,
-        }
+        matches!(self.state, Some(EncrypterState::Finalized))
     }
 
-    fn start(&mut self) -> Result<Stream<Push>, SaltlickError> {
-        let key = secretstream::gen_key();
-        let (stream, header) =
-            Stream::init_push(&key).map_err(|()| SaltlickError::StreamStartFailure)?;
+    fn start(&mut self) -> Result<PushStream, SaltlickError> {
+        let key = Key::generate(OsRng);
+        let (header, stream) = PushStream::init(&key);
         self.enc_block.clear();
-        self.enc_block.data = write::header_v1(&key, &header, &self.public_key);
+        self.enc_block.data = write::header_v1(&key, &header, &self.public_key)?;
         Ok(stream)
     }
 
-    fn gen_block(
-        &mut self,
-        stream: &mut Stream<Push>,
-        finalize: bool,
-    ) -> Result<(), SaltlickError> {
+    fn gen_block(&mut self, stream: &mut PushStream, finalize: bool) -> Result<(), SaltlickError> {
         let msg = self
             .plaintext
             .split_to(cmp::min(self.plaintext.len(), self.block_size));
-        let mut block_size_buf = [0u8; 4];
-        NetworkEndian::write_u32(&mut block_size_buf[..], msg.len() as u32);
-        self.enc_block.clear();
+        self.enc_block.length.resize(4, 0u8);
+        NetworkEndian::write_u32(&mut self.enc_block.length, msg.len() as u32);
         stream
-            .push_to_vec(
-                &block_size_buf[..],
-                None,
-                Tag::Message,
-                &mut self.enc_block.length,
-            )
-            .map_err(|()| SaltlickError::Finalized)?;
+            .push(&mut self.enc_block.length, &[], Tag::Message)
+            .map_err(|_| SaltlickError::Finalized)?;
         let tag = if finalize { Tag::Final } else { Tag::Message };
+        std::io::copy(&mut &msg[..], &mut self.enc_block.data)
+            .map_err(|_| SaltlickError::EncryptionFailure)?;
         stream
-            .push_to_vec(&msg[..], None, tag, &mut self.enc_block.data)
-            .map_err(|()| SaltlickError::Finalized)?;
+            .push(&mut self.enc_block.data, &[], tag)
+            .map_err(|_| SaltlickError::Finalized)?;
         Ok(())
     }
 
     fn estimate_output_size(&self, input_len: usize) -> usize {
         let nblocks = input_len / self.block_size + 2;
-        nblocks * (self.block_size + MESSAGE_LEN_LEN + secretstream::ABYTES)
+        nblocks * (self.block_size + MESSAGE_LEN_LEN + Stream::ABYTES)
     }
 }
 
@@ -341,6 +330,37 @@ impl fmt::Debug for KeyResolution {
     }
 }
 
+/// Wrapper around crypto_secretstream::PushStream that observes Tag::Final
+pub(crate) struct PushStream {
+    inner: crypto_secretstream::PushStream,
+    finalized: bool,
+}
+
+impl PushStream {
+    pub fn init(key: &Key) -> (Header, Self) {
+        let (header, inner) = crypto_secretstream::PushStream::init(OsRng, key);
+        let finalized = false;
+
+        (header, Self { inner, finalized })
+    }
+
+    pub fn push(
+        &mut self,
+        buffer: &mut impl crypto_secretstream::aead::Buffer,
+        associated_data: &[u8],
+        tag: Tag,
+    ) -> crypto_secretstream::aead::Result<()> {
+        if let Tag::Final = tag {
+            self.finalized = true;
+        }
+        self.inner.push(buffer, associated_data, tag)
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.finalized
+    }
+}
+
 #[derive(strum_macros::AsRefStr)]
 pub(crate) enum DecrypterState {
     ReadPreheader,
@@ -348,9 +368,9 @@ pub(crate) enum DecrypterState {
     SecretKeyLookup(PublicKey),
     ReadHeader(PublicKey, SecretKey),
     OpenStream(Key, Header),
-    ReadLength(Stream<Pull>),
-    ReadBlock(Stream<Pull>, usize),
-    FlushOutput(Stream<Pull>, bool),
+    ReadLength(PullStream),
+    ReadBlock(PullStream, usize),
+    FlushOutput(PullStream, bool),
     Finalized,
     Errored,
 }
@@ -557,10 +577,7 @@ impl DecrypterInner {
                     }
                 }
             }
-            OpenStream(key, header) => match Stream::init_pull(&header, &key) {
-                Ok(stream) => state::next(ReadLength(stream)),
-                Err(()) => state::err(SaltlickError::DecryptionFailure),
-            },
+            OpenStream(key, header) => state::next(ReadLength(PullStream::init(header, &key))),
             ReadLength(mut stream) => match read::length(&self_.ciphertext, &mut stream)? {
                 ReadStatus::Complete(length, n) => {
                     self_.ciphertext.advance(n);
@@ -622,10 +639,7 @@ impl DecrypterInner {
     }
 
     pub fn is_finalized(&self) -> bool {
-        match self.state {
-            Some(DecrypterState::Finalized) => true,
-            _ => false,
-        }
+        matches!(self.state, Some(DecrypterState::Finalized))
     }
 
     pub fn estimate_output_size(&self, input_len: usize) -> usize {
@@ -683,15 +697,17 @@ pub(crate) fn advance_slice_mut<T>(slice: &mut &mut [T], n: usize) {
 }
 
 mod read {
-    use super::{PublicKey, SaltlickError, SecretKey, Version, MAGIC, MAGIC_LEN, MESSAGE_LEN_LEN};
-    use byteorder::{ByteOrder, NetworkEndian};
-    use sodiumoxide::crypto::{
-        box_::PUBLICKEYBYTES,
-        sealedbox::{self, SEALBYTES},
-        secretstream::{Header, Key, Pull, Stream, Tag, ABYTES, HEADERBYTES, KEYBYTES},
+    use super::{
+        PublicKey, PullStream, SaltlickError, SecretKey, Version, MAGIC, MAGIC_LEN, MESSAGE_LEN_LEN,
     };
-    use std::mem;
+    use byteorder::{ByteOrder, NetworkEndian};
+    use crypto_box::{KEY_SIZE as PUBLICKEYBYTES, SEALBYTES};
+    use crypto_secretstream::{Header, Key, Stream, Tag};
+    use std::{convert::TryFrom, mem};
 
+    const ABYTES: usize = Stream::ABYTES;
+    const HEADERBYTES: usize = Header::BYTES;
+    const KEYBYTES: usize = Key::BYTES;
     const PREHEADER_LEN: usize = MAGIC_LEN + mem::size_of::<u8>();
     const SEALEDTEXT_LEN: usize = KEYBYTES + HEADERBYTES + SEALBYTES;
 
@@ -722,19 +738,21 @@ mod read {
 
     pub fn header_v1_sealed_text(
         input: &[u8],
-        public_key: &PublicKey,
+        _public_key: &PublicKey,
         secret_key: &SecretKey,
     ) -> Result<ReadStatus<(Key, Header)>, SaltlickError> {
         if input.len() < SEALEDTEXT_LEN {
             return Ok(ReadStatus::Incomplete(SEALEDTEXT_LEN - input.len()));
         }
         let sealed_text = &input[..SEALEDTEXT_LEN];
-        let plaintext = sealedbox::open(sealed_text, &public_key.inner, &secret_key.inner)
-            .map_err(|()| SaltlickError::DecryptionFailure)?;
+        let plaintext = secret_key
+            .inner
+            .unseal(sealed_text)
+            .map_err(|_| SaltlickError::DecryptionFailure)?;
         let symmetric_key =
-            Key::from_slice(&plaintext[..KEYBYTES]).ok_or(SaltlickError::DecryptionFailure)?;
-        let stream_header = Header::from_slice(&plaintext[KEYBYTES..(KEYBYTES + HEADERBYTES)])
-            .ok_or(SaltlickError::DecryptionFailure)?;
+            Key::try_from(&plaintext[..KEYBYTES]).map_err(|_| SaltlickError::DecryptionFailure)?;
+        let stream_header = Header::try_from(&plaintext[KEYBYTES..(KEYBYTES + HEADERBYTES)])
+            .map_err(|_| SaltlickError::DecryptionFailure)?;
         Ok(ReadStatus::Complete(
             (symmetric_key, stream_header),
             SEALEDTEXT_LEN,
@@ -743,14 +761,15 @@ mod read {
 
     pub fn length(
         input: &[u8],
-        stream: &mut Stream<Pull>,
+        stream: &mut PullStream,
     ) -> Result<ReadStatus<usize>, SaltlickError> {
         if input.len() < MESSAGE_LEN_LEN {
             return Ok(ReadStatus::Incomplete(MESSAGE_LEN_LEN - input.len()));
         }
-        let (plaintext, tag) = stream
-            .pull(&input[..MESSAGE_LEN_LEN], None)
-            .map_err(|()| SaltlickError::DecryptionFailure)?;
+        let mut plaintext = Vec::from(&input[..MESSAGE_LEN_LEN]);
+        let tag = stream
+            .pull(&mut plaintext, &[])
+            .map_err(|_| SaltlickError::DecryptionFailure)?;
         if tag != Tag::Message {
             // A length block should never be the end of the stream
             return Err(SaltlickError::DecryptionFailure);
@@ -764,16 +783,19 @@ mod read {
     pub fn block(
         input: &[u8],
         output: &mut Vec<u8>,
-        stream: &mut Stream<Pull>,
+        stream: &mut PullStream,
         message_length: usize,
     ) -> Result<ReadStatus<bool>, SaltlickError> {
         let block_len = message_length + ABYTES;
         if input.len() < block_len {
             return Ok(ReadStatus::Incomplete(block_len - input.len()));
         }
+        output.clear();
+        output.reserve(input.len());
+        std::io::copy(&mut &input[..], output).map_err(|_| SaltlickError::DecryptionFailure)?;
         let tag = stream
-            .pull_to_vec(&input[..block_len], None, output)
-            .map_err(|()| SaltlickError::DecryptionFailure)?;
+            .pull(output, &[])
+            .map_err(|_| SaltlickError::DecryptionFailure)?;
         match tag {
             Tag::Message if message_length == 0 => {
                 // The only message allowed to be zero-length is the final
@@ -788,11 +810,10 @@ mod read {
 }
 
 mod write {
+    use crate::SaltlickError;
+
     use super::{PublicKey, Version, MAGIC};
-    use sodiumoxide::crypto::{
-        sealedbox,
-        secretstream::{Header, Key},
-    };
+    use crypto_secretstream::{aead::OsRng, Header, Key};
 
     pub fn preheader(version: Version) -> Vec<u8> {
         let mut header = Vec::from(MAGIC);
@@ -804,15 +825,19 @@ mod write {
         symmetric_key: &Key,
         stream_header: &Header,
         public_key: &PublicKey,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, SaltlickError> {
         let mut to_encrypt = Vec::new();
-        to_encrypt.extend_from_slice(&symmetric_key[..]);
-        to_encrypt.extend_from_slice(&stream_header[..]);
+        to_encrypt.extend_from_slice(symmetric_key.as_ref());
+        to_encrypt.extend_from_slice(stream_header.as_ref());
 
         let mut header = preheader(Version::V1);
-        header.extend_from_slice(&public_key.inner[..]);
-        header.extend(sealedbox::seal(&to_encrypt, &public_key.inner));
-        header
+        header.extend_from_slice(public_key.inner.as_bytes());
+        let sealedbox = public_key
+            .inner
+            .seal(&mut OsRng, &to_encrypt)
+            .map_err(|_| SaltlickError::EncryptionFailure)?;
+        header.extend(sealedbox);
+        Ok(header)
     }
 }
 

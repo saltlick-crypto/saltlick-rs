@@ -22,12 +22,13 @@ maintenance = { status = "actively-developed" }
 async-stream = { version = "0.3", optional = true }
 byteorder = "1.3"
 bytes = "1"
+crypto_box = { version = "0.9", features = ["seal"] }
+crypto_secretstream = "0.2"
 futures = { version = "0.3", optional = true }
 lazy_static = "1.0"
 pem = "3"
 pin-project-lite = { version = "0.2", optional = true }
 simple_asn1 = "0.6"
-sodiumoxide = "0.2.3"                                   # 0.2.3 required for `(push|pull)_to_vec`
 strum = "0.26"
 strum_macros = "0.26"
 thiserror = "1.0"
@@ -38,7 +39,7 @@ async-stream = "0.3"
 proptest = "1"
 rand = "0.8"
 rand_xorshift = "0.3"
-tempdir = "0.3"
+tempfile = "3.10"
 tokio-stream = "0.1"
 
 [dev-dependencies.tokio]
