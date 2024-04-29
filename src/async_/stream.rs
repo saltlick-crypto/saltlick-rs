@@ -203,7 +203,7 @@ mod tests {
     use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use std::{cmp, io};
-    use tokio::stream::{self, StreamExt};
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn round_trip_test() {
@@ -218,15 +218,17 @@ mod tests {
             let random_data = random_bytes(0, *size);
             let (public_key, secret_key) = gen_keypair();
             let input_stream =
-                stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+                tokio_stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
             let mut encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
             encrypter.set_block_size(16 * 1024);
-            let decrypter = SaltlickDecrypterStream::new_deferred(encrypter, |_| Some(secret_key));
+            let mut decrypter =
+                SaltlickDecrypterStream::new_deferred(encrypter, |_| Some(secret_key));
+            let mut output = BytesMut::with_capacity(random_data.len());
 
-            let output: Bytes = decrypter
-                .collect::<Result<Bytes, io::Error>>()
-                .await
-                .unwrap();
+            while let Some(bytes) = decrypter.next().await {
+                output.extend(bytes);
+            }
+
             assert_eq!(&random_data[..], &output[..]);
         }
     }
@@ -243,14 +245,15 @@ mod tests {
     async fn async_key_lookup_test() {
         let random_data = random_bytes(2, 1024);
         let input_stream =
-            stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+            tokio_stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
         let encrypter = SaltlickEncrypterStream::new(ASYNC_KEYS.0.clone(), input_stream);
-        let decrypter = SaltlickDecrypterStream::new_deferred_async(encrypter, key_lookup);
+        let mut decrypter = SaltlickDecrypterStream::new_deferred_async(encrypter, key_lookup);
+        let mut output = BytesMut::with_capacity(random_data.len());
 
-        let output: Bytes = decrypter
-            .collect::<Result<Bytes, io::Error>>()
-            .await
-            .unwrap();
+        while let Some(bytes) = decrypter.next().await {
+            output.extend(bytes);
+        }
+
         assert_eq!(&random_data[..], &output[..]);
     }
 
@@ -262,7 +265,7 @@ mod tests {
                 if bytes.is_empty() {
                     break;
                 }
-                let n = rng.gen_range(1, 1024);
+                let n = rng.gen_range(1..1024);
                 let take = cmp::min(bytes.len(), n);
                 yield Ok(bytes.split_to(take));
             }
@@ -285,12 +288,13 @@ mod tests {
             // Take increasing chunks so we're varying chunk size.
             let input_stream = random_chunks(0, &random_data[..]);
             let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
-            let decrypter = SaltlickDecrypterStream::new(public_key, secret_key, encrypter);
+            let mut decrypter = SaltlickDecrypterStream::new(public_key, secret_key, encrypter);
+            let mut output = BytesMut::with_capacity(random_data.len());
 
-            let output: Bytes = decrypter
-                .collect::<Result<Bytes, io::Error>>()
-                .await
-                .unwrap();
+            while let Some(bytes) = decrypter.next().await {
+                output.extend(bytes);
+            }
+
             assert_eq!(&random_data[..], &output[..]);
         }
     }
@@ -300,23 +304,22 @@ mod tests {
         let random_data = random_bytes(0, 100 * 1024);
         let (public_key, secret_key) = gen_keypair();
         let input_stream =
-            stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
-        let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
-        let mut ciphertext = encrypter
-            .collect::<Result<BytesMut, io::Error>>()
-            .await
-            .unwrap();
+            tokio_stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+        let mut encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
+        let mut ciphertext = BytesMut::new();
+
+        while let Some(bytes) = encrypter.next().await {
+            ciphertext.extend(bytes);
+        }
 
         // Inject a single bad byte near the end of the stream
         let index = ciphertext.len() - 5;
         ciphertext[index] = ciphertext[index].wrapping_add(1);
 
-        let cipher_stream = stream::once(Ok::<_, io::Error>(ciphertext.freeze()));
-        let decrypter = SaltlickDecrypterStream::new(public_key, secret_key, cipher_stream);
-        decrypter
-            .collect::<Result<Bytes, io::Error>>()
-            .await
-            .unwrap_err();
+        let cipher_stream = tokio_stream::once(Ok::<_, io::Error>(ciphertext.freeze()));
+        let mut decrypter = SaltlickDecrypterStream::new(public_key, secret_key, cipher_stream);
+
+        assert!(decrypter.any(|entry| entry.is_err()).await);
     }
 
     #[tokio::test]
@@ -324,35 +327,41 @@ mod tests {
         let random_data = random_bytes(0, 100 * 1024);
         let (public_key, secret_key) = gen_keypair();
         let input_stream =
-            stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
-        let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
-        let mut ciphertext = encrypter
-            .collect::<Result<BytesMut, io::Error>>()
-            .await
-            .unwrap();
+            tokio_stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+        let mut encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
+        let mut ciphertext = BytesMut::new();
+
+        while let Some(bytes) = encrypter.next().await {
+            ciphertext.extend(bytes);
+        }
 
         // Remove a few bytes from the end
         ciphertext.truncate(ciphertext.len() - 5);
 
-        let cipher_stream = stream::once(Ok::<_, io::Error>(ciphertext.freeze()));
-        let decrypter = SaltlickDecrypterStream::new(public_key, secret_key.clone(), cipher_stream);
-        decrypter
-            .collect::<Result<Bytes, io::Error>>()
-            .await
-            .unwrap_err();
+        let cipher_stream = tokio_stream::once(Ok::<_, io::Error>(ciphertext.freeze()));
+        let mut decrypter =
+            SaltlickDecrypterStream::new(public_key, secret_key.clone(), cipher_stream);
+
+        assert!(decrypter.any(|entry| entry.is_err()).await);
     }
 
     #[tokio::test]
     async fn underlying_stream_error_test() {
         let (public_key, secret_key) = gen_keypair();
-        let input_stream = stream::once(Err::<Bytes, _>(io::Error::from(io::ErrorKind::Other)));
+        let input_stream =
+            tokio_stream::once(Err::<Bytes, _>(io::Error::from(io::ErrorKind::Other)));
         let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
         let decrypter = SaltlickDecrypterStream::new(public_key, secret_key, encrypter);
 
         let error = decrypter
-            .collect::<Result<Bytes, io::Error>>()
+            .filter_map(|entry| match entry {
+                Ok(_) => None,
+                Err(err) => Some(err),
+            })
+            .take(1)
+            .next()
             .await
-            .unwrap_err();
+            .unwrap();
         assert_eq!(io::ErrorKind::Other, error.kind());
     }
 
@@ -363,7 +372,7 @@ mod tests {
         let random_data = random_bytes(0, 100 * 1024);
         let (public_key, _secret_key) = gen_keypair();
         let input_stream =
-            stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
+            tokio_stream::once(Ok::<_, io::Error>(Bytes::copy_from_slice(&random_data[..])));
         let encrypter = SaltlickEncrypterStream::new(public_key.clone(), input_stream);
         let mut input_stream = encrypter.into_inner();
         assert_eq!(
