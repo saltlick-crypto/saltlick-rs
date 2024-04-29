@@ -92,7 +92,7 @@ impl fmt::Debug for EncrypterState {
 
 // Each encrypted block is made up of an encrypted size field of fixed size,
 // followed by an encrypted block with a decrypted length matching the value of
-// the preceeding size. This struct is a convenience for handling writing out
+// the preceding size. This struct is a convenience for handling writing out
 // both parts.
 #[derive(Debug)]
 struct EncryptedBlock {

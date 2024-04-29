@@ -1,0 +1,4 @@
+[default.extend-words]
+# Fixing this spelling would break the public API. Also, encryptor is not
+# orthogonal to decrypter... gotta love English.
+encrypter = "encrypter"
