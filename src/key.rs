@@ -7,9 +7,9 @@
 // except according to those terms.
 
 use crate::error::{SaltlickError, SaltlickKeyIoError};
+use crypto_box::{aead::OsRng, PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
 use lazy_static::lazy_static;
 use simple_asn1::{self, ASN1Block, ASN1Class, BigInt, FromASN1, ToASN1, OID};
-use sodiumoxide::crypto::box_::{PublicKey as SodiumPublicKey, SecretKey as SodiumSecretKey};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -17,7 +17,7 @@ use std::{
     str,
 };
 
-pub use sodiumoxide::crypto::box_::{self, PUBLICKEYBYTES, SECRETKEYBYTES};
+pub use crypto_box::{KEY_SIZE as PUBLICKEYBYTES, KEY_SIZE as SECRETKEYBYTES};
 
 lazy_static! {
     static ref CURVE25519_OID: OID = simple_asn1::oid!(1, 3, 101, 110);
@@ -42,7 +42,7 @@ impl PublicKey {
     /// by libsodium 1.x.
     pub fn from_raw_curve25519(bytes: &[u8]) -> Result<PublicKey, SaltlickError> {
         let sodium_key =
-            SodiumPublicKey::from_slice(bytes).ok_or(SaltlickError::IncorrectKeyLength)?;
+            SodiumPublicKey::from_slice(bytes).map_err(|_| SaltlickError::IncorrectKeyLength)?;
         Ok(PublicKey { inner: sodium_key })
     }
 
@@ -91,7 +91,7 @@ impl ToASN1 for PublicKey {
         public_key_asn1.push(ASN1Block::BitString(
             0,
             PUBLICKEYBYTES * 8,
-            Vec::from(&self.inner[..]),
+            Vec::from(self.inner.as_bytes()),
         ));
         Ok(vec![ASN1Block::Sequence(0, public_key_asn1)])
     }
@@ -171,7 +171,7 @@ impl SecretKey {
     /// libsodium 1.x.
     pub fn from_raw_curve25519(bytes: &[u8]) -> Result<SecretKey, SaltlickError> {
         let sodium_key =
-            SodiumSecretKey::from_slice(bytes).ok_or(SaltlickError::IncorrectKeyLength)?;
+            SodiumSecretKey::from_slice(bytes).map_err(|_| SaltlickError::IncorrectKeyLength)?;
         Ok(SecretKey { inner: sodium_key })
     }
 
@@ -219,7 +219,7 @@ impl ToASN1 for SecretKey {
         private_key_asn1.push(ASN1Block::Integer(0, BigInt::from(0u8)));
         private_key_asn1.extend(Curve25519Algorithm.to_asn1()?);
         let wrapped_key =
-            simple_asn1::to_der(&ASN1Block::OctetString(0, Vec::from(&self.inner[..])))?;
+            simple_asn1::to_der(&ASN1Block::OctetString(0, Vec::from(self.inner.to_bytes())))?;
         private_key_asn1.push(ASN1Block::OctetString(0, wrapped_key));
         Ok(vec![ASN1Block::Sequence(0, private_key_asn1)])
     }
@@ -259,8 +259,8 @@ impl FromASN1 for SecretKey {
             Some(ASN1Block::OctetString(_, secret_key)) => secret_key,
             _ => return Err(SaltlickError::InvalidKeyFormat),
         };
-        let sodium_secret_key =
-            SodiumSecretKey::from_slice(&secret_key[..]).ok_or(SaltlickError::InvalidKeyFormat)?;
+        let sodium_secret_key = SodiumSecretKey::from_slice(&secret_key[..])
+            .map_err(|_| SaltlickError::InvalidKeyFormat)?;
 
         Ok((
             SecretKey {
@@ -273,7 +273,8 @@ impl FromASN1 for SecretKey {
 
 /// Create a new saltlick keypair.
 pub fn gen_keypair() -> (PublicKey, SecretKey) {
-    let (raw_public, raw_secret) = box_::gen_keypair();
+    let raw_secret = SodiumSecretKey::generate(&mut OsRng);
+    let raw_public = raw_secret.public_key();
     (
         PublicKey { inner: raw_public },
         SecretKey { inner: raw_secret },
@@ -285,7 +286,7 @@ mod tests {
     use super::{PublicKey, SecretKey, PUBLICKEYBYTES, SECRETKEYBYTES};
     use crate::testutils::random_bytes;
     use std::{fs::File, io::Write};
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     const SECRET_KEY: &str = "-----BEGIN PRIVATE KEY-----
     MC4CAQAwBQYDK2VuBCIEIPi/trPNMJy8wbQtVl4oVR60m+7dFksCMU1CJHxQGtxo
@@ -355,7 +356,7 @@ mod tests {
 
     #[test]
     fn public_key_file_round_trip_test() {
-        let tmp_dir = TempDir::new("public_key").unwrap();
+        let tmp_dir = TempDir::with_prefix("public_key").unwrap();
         for seed in 1..100 {
             let file_path = tmp_dir.path().join(format!("{}.pem", seed));
             let bytes = random_bytes(seed, PUBLICKEYBYTES);
@@ -368,7 +369,7 @@ mod tests {
 
     #[test]
     fn secret_key_file_round_trip_test() {
-        let tmp_dir = TempDir::new("secret_key").unwrap();
+        let tmp_dir = TempDir::with_prefix("secret_key").unwrap();
         for seed in 1..100 {
             let file_path = tmp_dir.path().join(format!("{}.pem", seed));
             let bytes = random_bytes(seed, SECRETKEYBYTES);
@@ -381,7 +382,7 @@ mod tests {
 
     #[test]
     fn bad_public_key_file_test() {
-        let tmp_dir = TempDir::new("public_key").unwrap();
+        let tmp_dir = TempDir::with_prefix("public_key").unwrap();
         let file_path = tmp_dir.path().join("too_many.pem");
         let bytes = random_bytes(0, PUBLICKEYBYTES + 1);
         File::create(&file_path)
@@ -400,7 +401,7 @@ mod tests {
 
     #[test]
     fn bad_secret_key_file_test() {
-        let tmp_dir = TempDir::new("secret_key").unwrap();
+        let tmp_dir = TempDir::with_prefix("secret_key").unwrap();
         let file_path = tmp_dir.path().join("too_many.pem");
         let bytes = random_bytes(0, SECRETKEYBYTES + 1);
         File::create(&file_path)

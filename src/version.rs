@@ -39,10 +39,7 @@ impl Version {
 
     /// True if this is not a known version.
     pub fn is_unknown(self) -> bool {
-        match self {
-            Version::Unknown(_) => true,
-            _ => false,
-        }
+        matches!(self, Version::Unknown(_))
     }
 }
 

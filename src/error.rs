@@ -18,6 +18,8 @@ pub enum SaltlickError {
     BadMagic,
     #[error("Failed to decrypt - stream is corrupt.")]
     DecryptionFailure,
+    #[error("Failed to encrypt - buffer too small?")]
+    EncryptionFailure,
     #[error("Stream is finalized, no more data may be written.")]
     Finalized,
     #[error("Stream ended before Final tag receive, file is incomplete!")]
